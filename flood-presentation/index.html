@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fenomena Banjir - Analisis Hidrosfer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow-x: hidden;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white;
+        }
+
+        #canvas-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100vh;
+            z-index: -1;
+        }
+
+        .slide {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 40px;
+            opacity: 0;
+            transform: translateY(50px);
+            transition: all 1s ease;
+        }
+
+        .slide.active {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .content-box {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 800px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            font-size: 3em;
+            margin-bottom: 20px;
+            text-align: center;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+            animation: pulse 2s infinite;
+        }
+
+        h2 {
+            font-size: 2em;
+            margin-bottom: 20px;
+            color: #4fc3f7;
+        }
+
+        p {
+            font-size: 1.2em;
+            line-height: 1.8;
+            margin-bottom: 15px;
+            text-align: justify;
+        }
+
+        .highlight {
+            color: #ffeb3b;
+            font-weight: bold;
+        }
+
+        .concept-box {
+            background: rgba(79, 195, 247, 0.2);
+            border-left: 4px solid #4fc3f7;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 0 10px 10px 0;
+        }
+
+        .principle-box {
+            background: rgba(255, 235, 59, 0.2);
+            border-left: 4px solid #ffeb3b;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 0 10px 10px 0;
+        }
+
+        ul {
+            margin-left: 30px;
+            margin-bottom: 20px;
+        }
+
+        li {
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
+        .scroll-indicator {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            animation: bounce 2s infinite;
+            z-index: 100;
+        }
+
+        @keyframes bounce {
+            0%, 100% { transform: translateX(-50%) translateY(0); }
+            50% { transform: translateX(-50%) translateY(-10px); }
+        }
+
+        .water-drop {
+            position: absolute;
+            background: rgba(79, 195, 247, 0.6);
+            border-radius: 50% 50% 50% 0;
+            animation: fall linear infinite;
+        }
+
+        @keyframes fall {
+            to {
+                transform: translateY(100vh) rotate(360deg);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+
+    <!-- Slide 1: Judul -->
+    <div class="slide active" id="slide1">
+        <div class="content-box">
+            <h1>🌊 Fenomena Banjir dalam Perspektif Hidrosfer</h1>
+            <p style="text-align: center; font-size: 1.5em; margin-top: 30px;">
+                Analisis Geografis Interaktif
+            </p>
+            <p style="text-align: center; margin-top: 20px; color: #4fc3f7;">
+                Scroll ke bawah untuk memulai presentasi
+            </p>
+        </div>
+    </div>
+
+    <!-- Slide 2: Objek Material -->
+    <div class="slide" id="slide2">
+        <div class="content-box">
+            <h2>🎯 Objek Material Kajian</h2>
+            <p>
+                <span class="highlight">Objek material</span> dalam geografi merujuk pada <strong>apa yang dipelajari</strong>. 
+                Dalam konteks banjir, objek materialnya adalah:
+            </p>
+            <div class="concept-box">
+                <ul>
+                    <li><strong>Hidrosfer</strong> - Lapisan air di permukaan bumi</li>
+                    <li><strong>Siklus hidrologi</strong> - Pergerakan air secara kontinu</li>
+                    <li><strong>Daerah Aliran Sungai (DAS)</strong> - Wilayah tangkapan air</li>
+                    <li><strong>Kondisi fisik lingkungan</strong> - Topografi, tanah, vegetasi</li>
+                </ul>
+            </div>
+            <p>
+                Banjir merupakan manifestasi dari ketidakseimbangan dalam sistem hidrosfer yang dipengaruhi 
+                oleh faktor alami dan antropogenik.
+            </p>
+        </div>
+    </div>
+
+    <!-- Slide 3: Judul Fenomena -->
+    <div class="slide" id="slide3">
+        <div class="content-box">
+            <h2>📰 Narasi Fenomena Banjir</h2>
+            <p>
+                <span class="highlight">"Banjir Bandang di Jakarta: Ketika Alam Menunjukkan Kekuatannya"</span>
+            </p>
+            <p>
+                Pada Januari 2024, wilayah Jakarta dan sekitarnya dilanda banjir besar yang disebabkan oleh 
+                curah hujan ekstrem mencapai <strong>150 mm/hari</strong>. Sungai-sungai utama seperti 
+                Ciliwung, Cisadane, dan Angke meluap, menggenangi ribuan hektar permukiman.
+            </p>
+            <div class="principle-box">
+                <p><strong>Faktor Penyebab:</strong></p>
+                <ul>
+                    <li>Intensitas hujan tinggi melebihi kapasitas infiltrasi tanah</li>
+                    <li>Berkurangnya daerah resapan akibat urbanisasi</li>
+                    <li>Pendangkalan sungai akibat sedimentasi</li>
+                    <li>Sistem drainase yang tidak memadai</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Slide 4: Analisis Geografis -->
+    <div class="slide" id="slide4">
+        <div class="content-box">
+            <h2>🔍 Analisis Fenomena</h2>
+            <p>
+                Banjir dapat dianalisis melalui pendekatan geografis yang komprehensif:
+            </p>
+            <div class="concept-box">
+                <h3 style="color: #4fc3f7; margin-bottom: 15px;">Analisis Spasial</h3>
+                <p>
+                    Distribusi spasial banjir menunjukkan pola tertentu berdasarkan:
+                </p>
+                <ul>
+                    <li>Ketinggian tempat (dataran rendah lebih rentan)</li>
+                    <li>Jarak dari sungai utama</li>
+                    <li>Tutupan lahan (area terbangun vs area hijau)</li>
+                </ul>
+            </div>
+            <div class="concept-box">
+                <h3 style="color: #4fc3f7; margin-bottom: 15px;">Analisis Ekologis</h3>
+                <p>
+                    Kerusakan ekosistem DAS menyebabkan penurunan kemampuan retensi air:
+                </p>
+                <ul>
+                    <li>Deforestasi mengurangi intersepsi hujan</li>
+                    <li>Alih fungsi lahan mengubah koefisien runoff</li>
+                    <li>Degradasi kualitas tanah menurunkan infiltrasi</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Slide 5: Prinsip Geografi -->
+    <div class="slide" id="slide5">
+        <div class="content-box">
+            <h2>📐 Prinsip-Prinsip Geografi</h2>
+            <p>
+                Empat prinsip geografi diterapkan dalam analisis banjir:
+            </p>
+            
+            <div class="principle-box">
+                <h3 style="color: #ffeb3b;">1. Prinsip Distribusi/Persebaran</h3>
+                <p>
+                    Banjir tidak tersebar merata. Area dengan karakteristik tertentu 
+                    (topografi rendah, dekat sungai, tutupan lahan minim) memiliki 
+                    kerentanan lebih tinggi.
+                </p>
+            </div>
+
+            <div class="principle-box">
+                <h3 style="color: #ffeb3b;">2. Prinsip Interelasi</h3>
+                <p>
+                    Terdapat hubungan timbal balik antara faktor klimatologi (curah hujan), 
+                    hidrologi (debit sungai), dan aktivitas manusia (penggunaan lahan) 
+                    yang bersama-sama memicu banjir.
+                </p>
+            </div>
+
+            <div class="principle-box">
+                <h3 style="color: #ffeb3b;">3. Prinsip Deskripsi</h3>
+                <p>
+                    Penjelasan detail tentang proses terjadinya banjir, mulai dari 
+                    presipitasi, aliran permukaan, hingga genangan, dilengkapi data 
+                    kuantitatif dan kualitatif.
+                </p>
+            </div>
+
+            <div class="principle-box">
+                <h3 style="color: #ffeb3b;">4. Prinsip Korologi</h3>
+                <p>
+                    Kajian komprehensif yang menggabungkan ketiga prinsip sebelumnya 
+                    untuk memahami banjir sebagai fenomena kompleks dalam konteks 
+                    wilayah tertentu.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Slide 6: Konsep Geografi -->
+    <div class="slide" id="slide6">
+        <div class="content-box">
+            <h2>💡 Konsep-Konsep Geografi</h2>
+            <p>
+                Minimal 5 konsep geografi yang relevan dengan fenomena banjir:
+            </p>
+
+            <div class="concept-box">
+                <h3 style="color: #4fc3f7;">1. Konsep Lokasi</h3>
+                <p>
+                    <strong>Lokasi absolut:</strong> Koordinat geografis area terdampak<br>
+                    <strong>Lokasi relatif:</strong> Posisi terhadap sungai, pantai, atau daerah resapan
+                </p>
+            </div>
+
+            <div class="concept-box">
+                <h3 style="color: #4fc3f7;">2. Konsep Jarak</h3>
+                <p>
+                    Jarak dari sumber air (sungai, laut) mempengaruhi tingkat kerentanan. 
+                    Semakin dekat dengan badan air, semakin tinggi risiko banjir.
+                </p>
+            </div>
+
+            <div class="concept-box">
+                <h3 style="color: #4fc3f7;">3. Konsep Keterjangkauan</h3>
+                <p>
+                    Aksesibilitas lokasi mempengaruhi evakuasi dan distribusi bantuan. 
+                    Daerah terpencil lebih sulit dijangkau saat bencana.
+                </p>
+            </div>
+
+            <div class="concept-box">
+                <h3 style="color: #4fc3f7;">4. Konsep Pola</h3>
+                <p>
+                    Pola persebaran banjir mengikuti pola aliran sungai dan topografi. 
+                    Pemahaman pola membantu prediksi dan mitigasi.
+                </p>
+            </div>
+
+            <div class="concept-box">
+                <h3 style="color: #4fc3f7;">5. Konsep Interdependensi</h3>
+                <p>
+                    Wilayah hulu dan hilir saling bergantung. Kerusakan di hulu 
+                    (deforestasi) berdampak pada banjir di hilir.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Slide 7: Kesimpulan -->
+    <div class="slide" id="slide7">
+        <div class="content-box">
+            <h2>✅ Kesimpulan</h2>
+            <p>
+                Banjir merupakan fenomena kompleks dalam sistem <span class="highlight">hidrosfer</span> yang 
+                memerlukan pemahaman geografis menyeluruh. Dengan menerapkan:
+            </p>
+            <ul>
+                <li><strong>4 Prinsip Geografi</strong> (Distribusi, Interelasi, Deskripsi, Korologi)</li>
+                <li><strong>5+ Konsep Geografi</strong> (Lokasi, Jarak, Keterjangkauan, Pola, Interdependensi)</li>
+            </ul>
+            <p style="margin-top: 20px;">
+                Kita dapat menganalisis, memprediksi, dan memitigasi dampak banjir secara lebih efektif. 
+                Pendekatan geografis memberikan perspektif holistik dalam memahami interaksi antara 
+                komponen alam dan aktivitas manusia.
+            </p>
+            <div class="principle-box" style="margin-top: 30px; text-align: center;">
+                <p style="font-size: 1.3em; font-weight: bold;">
+                    🌍 "Memahami Bumi untuk Masa Depan yang Lebih Baik"
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <div class="scroll-indicator">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="white">
+            <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/>
+        </svg>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // Three.js Scene Setup
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        // Create water particles
+        const particles = [];
+        const particleGeometry = new THREE.SphereGeometry(0.1, 8, 8);
+        const particleMaterial = new THREE.MeshPhongMaterial({ 
+            color: 0x4fc3f7,
+            transparent: true,
+            opacity: 0.8,
+            shininess: 100
+        });
+
+        for (let i = 0; i < 500; i++) {
+            const particle = new THREE.Mesh(particleGeometry, particleMaterial);
+            particle.position.x = (Math.random() - 0.5) * 50;
+            particle.position.y = (Math.random() - 0.5) * 50;
+            particle.position.z = (Math.random() - 0.5) * 30 - 10;
+            particle.velocity = Math.random() * 0.05 + 0.02;
+            particles.push(particle);
+            scene.add(particle);
+        }
+
+        // Create wave surface
+        const waveGeometry = new THREE.PlaneGeometry(100, 100, 50, 50);
+        const waveMaterial = new THREE.MeshPhongMaterial({ 
+            color: 0x1e88e5,
+            transparent: true,
+            opacity: 0.3,
+            side: THREE.DoubleSide,
+            shininess: 100
+        });
+        const wave = new THREE.Mesh(waveGeometry, waveMaterial);
+        wave.rotation.x = -Math.PI / 2;
+        wave.position.y = -15;
+        scene.add(wave);
+
+        // Create floating objects (representing debris)
+        const debrisObjects = [];
+        const debrisGeometry = new THREE.BoxGeometry(0.5, 0.3, 0.5);
+        const debrisMaterial = new THREE.MeshPhongMaterial({ color: 0x8d6e63 });
+
+        for (let i = 0; i < 20; i++) {
+            const debris = new THREE.Mesh(debrisGeometry, debrisMaterial);
+            debris.position.x = (Math.random() - 0.5) * 40;
+            debris.position.y = -14 + Math.random() * 2;
+            debris.position.z = (Math.random() - 0.5) * 20;
+            debris.rotationSpeed = {
+                x: Math.random() * 0.02,
+                y: Math.random() * 0.02,
+                z: Math.random() * 0.02
+            };
+            debrisObjects.push(debris);
+            scene.add(debris);
+        }
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+
+        const pointLight = new THREE.PointLight(0xffffff, 1);
+        pointLight.position.set(10, 10, 10);
+        scene.add(pointLight);
+
+        camera.position.z = 5;
+
+        // Animation variables
+        let time = 0;
+        let scrollY = 0;
+        let targetScrollY = 0;
+
+        // Handle scroll
+        window.addEventListener('scroll', () => {
+            targetScrollY = window.scrollY;
+        });
+
+        // Handle resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Slide detection
+        const slides = document.querySelectorAll('.slide');
+        const observerOptions = {
+            threshold: 0.3
+        };
+
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('active');
+                } else {
+                    entry.target.classList.remove('active');
+                }
+            });
+        }, observerOptions);
+
+        slides.forEach(slide => {
+            observer.observe(slide);
+        });
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            time += 0.01;
+
+            // Smooth scroll interpolation
+            scrollY += (targetScrollY - scrollY) * 0.05;
+
+            // Animate particles (falling water drops)
+            particles.forEach((particle, index) => {
+                particle.position.y -= particle.velocity;
+                particle.position.x += Math.sin(time + index) * 0.01;
+                
+                if (particle.position.y < -25) {
+                    particle.position.y = 25;
+                    particle.position.x = (Math.random() - 0.5) * 50;
+                }
+            });
+
+            // Animate wave
+            const positions = wave.geometry.attributes.position.array;
+            for (let i = 0; i < positions.length; i += 3) {
+                const x = positions[i];
+                const y = positions[i + 1];
+                positions[i + 2] = Math.sin(x * 0.3 + time) * Math.cos(y * 0.3 + time) * 2;
+            }
+            wave.geometry.attributes.position.needsUpdate = true;
+
+            // Animate debris
+            debrisObjects.forEach(debris => {
+                debris.rotation.x += debris.rotationSpeed.x;
+                debris.rotation.y += debris.rotationSpeed.y;
+                debris.rotation.z += debris.rotationSpeed.z;
+                debris.position.y = -14 + Math.sin(time + debris.position.x) * 1;
+            });
+
+            // Camera movement based on scroll
+            camera.position.y = -scrollY * 0.002;
+            camera.rotation.x = Math.sin(scrollY * 0.001) * 0.1;
+
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // Create HTML water drops
+        function createWaterDrop() {
+            const drop = document.createElement('div');
+            drop.className = 'water-drop';
+            drop.style.left = Math.random() * 100 + 'vw';
+            drop.style.width = Math.random() * 20 + 10 + 'px';
+            drop.style.height = Math.random() * 20 + 10 + 'px';
+            drop.style.animationDuration = Math.random() * 2 + 3 + 's';
+            document.body.appendChild(drop);
+
+            setTimeout(() => {
+                drop.remove();
+            }, 5000);
+        }
+
+        setInterval(createWaterDrop, 200);
+    </script>
+</body>
+</html>
