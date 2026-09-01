@@ -40,7 +40,13 @@ That's it. You get the menu:
 Type a prompt → two **anonymous** models ("Model A" and "Model B") both answer → you vote for the winner → names get revealed → your local **Elo leaderboard** updates. Just like the real arena, but in your terminal.
 
 ### 🤖 Agent Mode
-Give the AI a task ("make me a python script that renames all my files", "what's eating my disk space?"). It can run shell commands, read files, and write files — but **every single action needs your y/n approval** first. Needs a real API key.
+A coding agent for **whatever folder you're in**. Open your project in VS Code, pop open the built-in terminal (`` Ctrl+` ``), run `arena`, pick Agent Mode, and tell it stuff like:
+
+- *"add a dark mode toggle to index.html"*
+- *"create a style.css and link it"*
+- *"make a snake game with html/css/js"*
+
+It automatically sees your folder's file tree, then it can **list, read, edit and create files** and run shell commands. Every file change is shown as a **diff** first and asks for approval: `y` = yes, `n` = no, `a` = allow everything for the rest of the task (so it can build multi-file things without spamming you). Needs a real API key.
 
 ### 💬 Direct Chat
 Pick a model, chat with it. Streaming responses, markdown rendering, `/model` to switch, `/clear` to reset.

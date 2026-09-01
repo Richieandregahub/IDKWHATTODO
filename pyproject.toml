@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arena-cli"
-version = "0.1.0"
+version = "0.2.0"
 description = "arena.ai but it lives in your terminal - battle mode, agent mode, direct chat"
 readme = "README.md"
 requires-python = ">=3.8"
