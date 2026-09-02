@@ -914,7 +914,8 @@ def cmd_menu(args) -> int:
         print(bold("  Main Menu"))
         print("  " + cyan("1") + "  Trace an IP / hostname")
         print("  " + cyan("2") + "  Look up a phone number")
-        print("  " + cyan("3") + "  About / legal notice")
+        print("  " + cyan("3") + "  Search social media / username")
+        print("  " + cyan("4") + "  About / legal notice")
         print("  " + cyan("q") + "  Quit")
         try:
             choice = input(bold("  Pick: ")).strip().lower()
@@ -959,15 +960,164 @@ def cmd_menu(args) -> int:
                     return 2
             cmd_phone(sub)
         elif choice == "3":
+            try:
+                query = input(cyan("  username or phone number: ")).strip()
+            except (EOFError, KeyboardInterrupt):
+                print("")
+                continue
+            if not query:
+                continue
+            sub = argparse.Namespace(**vars(args))
+            sub.command = "social"
+            sub.query = query
+            if not sub.yes:
+                if not acknowledge(args):
+                    print(red("acknowledgment required"))
+                    return 2
+            cmd_social(sub)
+        elif choice == "4":
             print(red(DISCLAIMER))
             print(dim("data sources: ip-api.com, ipwho.is, ipinfo.io, rdap.org"))
             print(dim("system traceroute/whois (if installed), python-phonenumbers"))
             print(dim("optional phone APIs: veriphone.io / abstractapi.com / numverify"))
         else:
-            print(yellow("pick 1, 2, 3, or q"))
+            print(yellow("pick 1, 2, 3, 4, or q"))
     print("")
     return 0
 
+
+
+# ---- social media account lookup -------------------------------------------
+
+SOCIAL_PLATFORMS = [
+    ("Instagram", "https://www.instagram.com/{}/", "web", ""),
+    ("Twitter/X", "https://x.com/{}/", "web", ""),
+    ("TikTok", "https://www.tiktok.com/@{}/", "web", ""),
+    ("Facebook", "https://www.facebook.com/{}/", "web", "often blocked"),
+    ("YouTube", "https://www.youtube.com/@{}/", "web", ""),
+    ("GitHub", "https://github.com/{}", "web", ""),
+    ("Reddit", "https://www.reddit.com/user/{}/", "web", ""),
+    ("LinkedIn", "https://www.linkedin.com/in/{}/", "web", "often blocked"),
+    ("Snapchat", "https://www.snapchat.com/add/{}", "web", ""),
+    ("Telegram", "https://t.me/{}", "web", ""),
+    ("WhatsApp", "https://wa.me/{}", "web", "phone number"),
+    ("Pinterest", "https://www.pinterest.com/{}/", "web", ""),
+    ("Twitch", "https://www.twitch.tv/{}", "web", ""),
+    ("Spotify", "https://open.spotify.com/user/{}", "web", ""),
+    ("Medium", "https://medium.com/@{}/", "web", ""),
+    ("DeviantArt", "https://www.deviantart.com/{}", "web", ""),
+    ("Behance", "https://www.behance.net/{}", "web", ""),
+    ("Keybase", "https://keybase.io/{}", "web", ""),
+    ("Flickr", "https://www.flickr.com/people/{}/", "web", ""),
+    ("Tumblr", "https://{}.tumblr.com", "dns", "subdomain"),
+    ("Patreon", "https://www.patreon.com/{}", "web", ""),
+    ("ProductHunt", "https://www.producthunt.com/@{}/", "web", ""),
+    ("Hashnode", "https://hashnode.com/@{}/", "web", ""),
+    ("Dev.to", "https://dev.to/{}", "web", ""),
+    ("Codepen", "https://codepen.io/{}", "web", ""),
+    ("Replit", "https://replit.com/@{}/", "web", ""),
+    ("Steam", "https://steamcommunity.com/id/{}", "web", ""),
+    ("About.me", "https://about.me/{}", "web", ""),
+    ("Linktree", "https://linktr.ee/{}", "web", ""),
+    ("BuyMeACoffee", "https://www.buymeacoffee.com/{}", "web", ""),
+    ("Kofi", "https://ko-fi.com/{}", "web", ""),
+    ("Carrd", "https://{}.carrd.co", "dns", "subdomain"),
+    ("Bio.link", "https://bio.link/{}", "web", ""),
+    ("Goodreads", "https://www.goodreads.com/{}", "web", ""),
+    ("Last.fm", "https://www.last.fm/user/{}", "web", ""),
+    ("SoundCloud", "https://soundcloud.com/{}", "web", ""),
+    ("Bandcamp", "https://{}.bandcamp.com", "dns", "subdomain"),
+    ("VK", "https://vk.com/{}", "web", "Russian platform"),
+    ("Weibo", "https://weibo.com/{}", "web", "Chinese platform"),
+    ("Threads", "https://www.threads.net/@{}/", "web", ""),
+]
+
+
+def social_check_web(platform, url):
+    """Check if a profile URL exists via HTTP HEAD request."""
+    req = urllib.request.Request(url, method="HEAD",
+                                  headers={"User-Agent": UA, "Accept": "text/html"})
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        code = resp.getcode()
+        if code is None:
+            code = 200
+        return 200 <= code < 400, code
+    except urllib.error.HTTPError as e:
+        return e.code in (200, 301, 302, 403), e.code
+    except Exception:
+        return None, None
+
+
+def social_check_username(username, offline=False, demo=False):
+    """Check if a username exists across social media platforms."""
+    results = []
+    username = username.strip()
+    if not username:
+        return results
+    for name, url_tmpl, check_type, note in SOCIAL_PLATFORMS:
+        if "{}" in url_tmpl:
+            url = url_tmpl.replace("{}", username)
+        else:
+            url = url_tmpl
+        entry = {"platform": name, "url": url, "type": check_type, "note": note}
+        if demo:
+            import random
+            r = random.random()
+            entry["exists"] = r > 0.55
+            entry["code"] = 200 if entry["exists"] else 404
+        elif offline:
+            entry["exists"] = None
+            entry["code"] = None
+        else:
+            exists, code = social_check_web(name, url)
+            entry["exists"] = exists
+            entry["code"] = code
+        results.append(entry)
+    return results
+
+
+def print_social_results(results):
+    """Print social media check results."""
+    found = [r for r in results if r.get("exists") or (r.get("code") is not None and r.get("code") < 400)]
+    if not found:
+        print(dim("  No social media accounts found for this query"))
+        return
+    print("")
+    print(bold(cyan("SOCIAL MEDIA ACCOUNTS")))
+    for entry in found:
+        url = entry.get("url", "")
+        plat = entry.get("platform", "")
+        note = entry.get("note") or ""
+        code = entry.get("code")
+        icon = green("✔") if entry.get("exists") else dim("?")
+        extras = ""
+        if note:
+            extras += dim(" (" + note + ")")
+        if code:
+            extras += dim(" [HTTP " + str(code) + "]")
+        print("   " + icon + " " + bold(plat) + ": " + cyan(url) + extras)
+    print("")
+
+
+def cmd_social(args):
+    query = (args.query or "").strip()
+    if not query:
+        print(red("no target given (username or phone number)"))
+        return 2
+    print(bold(BANNER))
+    print("  Target: " + bold(query))
+    is_phone = query.startswith("+") or (query.isdigit() and len(query) > 6)
+    if is_phone:
+        print("  " + dim("(detected as phone number)"))
+    else:
+        print("  " + dim("(detected as username)"))
+    results = social_check_username(query, offline=args.offline, demo=args.demo)
+    print_social_results(results)
+    if getattr(args, "json", False):
+        print("--- JSON ---")
+        print(json.dumps(results, indent=2, default=str))
+    return 0
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -990,6 +1140,8 @@ def build_parser() -> argparse.ArgumentParser:
     phone_p = sub.add_parser("phone", parents=[common], help="validate & locate a phone number")
     phone_p.add_argument("number", help="phone number e.g. +628123456789")
     phone_p.add_argument("-c", "--country", metavar="CC", help="ISO-2 country for local numbers")
+    social_p = sub.add_parser("social", parents=[common], help="look up social media / username across platforms")
+    social_p.add_argument("query", help="username or phone number to search for")
     p.set_defaults(command="menu")
     return p
 
@@ -1000,6 +1152,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     USE_COLOR = sys.stdout.isatty() and not args.no_color
     if args.command == "menu":
         return cmd_menu(args)
+    if args.command == "social":
+        return cmd_social(args)
     if not acknowledge(args):
         print(red("you must acknowledge the legal notice first"))
         return 2
