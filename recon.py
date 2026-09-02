@@ -98,6 +98,81 @@ def cyan(t): return paint(C.CYAN, str(t))
 def dim(t): return paint(C.DIM, str(t))
 
 
+# ---- TUI helpers (pure ANSI, zero deps) ---------------------------------
+
+import shutil as _sh
+import threading as _th
+import itertools as _it
+
+_BX = {
+    "H": """─""", "V": """│""",
+    "TL": """┌""", "TR": """┐""",
+    "BL": """└""", "BR": """┘""",
+    "LT": """├""", "RT": """┤""",
+    "BB": """┬""", "TB": """┴""",
+}
+
+def _tw():
+    try: return _sh.get_terminal_size().columns
+    except: return 80
+
+def box(msg, color=None):
+    w = min(_tw()-4, 72)
+    p = max(0, (_tw()-w)//2)
+    h = _BX["H"]*(w-2)
+    c = lambda t: color+t+C.RESET if color else t
+    print(" "*p + c(_BX["TL"]) + c(h) + c(_BX["TR"]))
+    for ln in msg.split(chr(92)+"n"):
+        print(" "*p + c(_BX["V"]) + " " + (bold if USE_COLOR else str)(ln.center(w-6)) + " " + c(_BX["V"]))
+    print(" "*p + c(_BX["BL"]) + c(h) + c(_BX["BR"]))
+
+def hdr(t):
+    print("")
+    print("  " + cyan(_BX["BB"]) + " " + bold(t))
+
+def ask(p):
+    print("")
+    print("  " + cyan(_BX["V"]) + " " + p)
+    print("  " + cyan(_BX["LT"]) + cyan(_BX["H"]) + " ", end="")
+    try:
+        return input().strip()
+    except:
+        print()
+        return ""
+
+def ok(m): print("  " + green(chr(10003)) + " " + m)
+def info(m): print("  " + cyan(chr(9433)) + " " + m)
+def warn(m): print("  " + yellow(chr(9888)) + " " + m)
+def fail(m): print("  " + red(chr(10007)) + " " + m)
+
+def kv(k, v, c=""):
+    vv = bold(v) if c else v
+    print("    " + dim(k+":") + " " + (c+vv+C.RESET if c else vv))
+
+class Spin:
+    def __init__(self, m=""):
+        self.m = m; self._r = False; self._t = None
+    def start(self):
+        self._r = True
+        self._t = _th.Thread(target=self._run, daemon=True)
+        self._t.start()
+    def _run(self):
+        ch = ["|", "/", "-", "\\"]
+        while self._r:
+            for c in ch:
+                if not self._r: return
+                sys.stdout.write(chr(13) + "  " + cyan(c) + " " + self.m + "   ")
+                sys.stdout.flush(); time.sleep(0.1)
+    def stop(self, ok=True):
+        self._r = False
+        if self._t: self._t.join(timeout=0.5)
+        icon = green(chr(10003)) if ok else yellow(chr(9888))
+        sys.stdout.write(chr(13) + "  " + icon + " " + self.m + "     " + chr(10))
+        sys.stdout.flush()
+
+
+
+
 # ---- country code table: cc (no "+") -> (iso2, full name) ----
 
 CC_TABLE: Dict[str, Tuple[str, str]] = {
@@ -569,8 +644,7 @@ GEO_FIELDS = (
 
 def print_geo(data: Dict[str, Any]) -> None:
     target = data.get("query") or data.get("ip") or "unknown"
-    print("")
-    print(bold(cyan("GEO-LOCATION " + str(target))))
+    hdr("GEO-LOCATION")
     for key, title in GEO_FIELDS:
 
         raw = data.get(key)
@@ -582,12 +656,12 @@ def print_geo(data: Dict[str, Any]) -> None:
             raw = "AS" + str(raw)
         if key in ("lat", "lon")and isinstance(raw, (int, float)):
             raw = "{:.5f}".format(raw)
-        print("   " + dim(title) + ": " + bold(str(raw)))
+        kv(title, str(raw))
 
 
 def print_rdap(data: Dict[str, Any]) -> None:
     print("")
-    print(bold(cyan("REGISTRY (RDAP / WHOIS)")))
+    hdr("REGISTRY")
     plain = (
         ("handle", "Handle"),
         ("name", "Net name"),
@@ -631,14 +705,18 @@ def cmd_ip(args) -> int:
         print(dim("offline mode — no live lookups"))
     else:
         ip0 = ips[0]
+        sp = Spin("Querying geoIP..."); sp.start()
         geo = geoip_lookup(ip0, demo=args.demo)
+        sp.stop(bool(geo))
         if geo:
             result["geoip"] = geo
             print_geo(geo)
         else:
             print(yellow("geoIP lookup failed (no network / rate-limited?)"))
         if not getattr(args, "no_whois", False):
+            sp = Spin("Querying registry..."); sp.start()
             reg = rdap_lookup(ip0, demo=args.demo)
+            sp.stop(bool(reg))
             if reg:
                 result["registry"] = reg
                 print_rdap(reg)
@@ -795,14 +873,14 @@ def phonenumbers_lookup(e164: str) -> Optional[Dict[str, Any]]:
 
 def print_phone_local(parsed: Dict[str, Any], pn: Optional[Dict[str, Any]] = None) -> None:
     print("")
-    print(bold(cyan("PHONE NUMBER INTELLIGENCE")))
+    hdr("PHONE NUMBER INTELLIGENCE")
     e164 = parsed.get("e164") or (pn or {}).get("e164")
     if e164:
-        print("   E.164: " + bold(e164))
+        kv("E.164", e164)
     iso2 = parsed.get("iso2") or (pn or {}).get("region")
     if iso2:
         print("   Region: " + bold(str(iso2)))
-    print("   Country: " + bold(str(parsed.get("country") or "?")))
+    kv("Country", str(parsed.get("country") or "?"))
     if parsed.get("country_code"):
         print("   Code: " + bold(str(parsed["country_code"])))
     if pn:
@@ -907,87 +985,66 @@ def cmd_phone(args) -> int:
     return 0
 
 
+
 def cmd_menu(args) -> int:
-    print(bold(BANNER))
+    try:
+        subprocess.call("clear" if sys.platform != "win32" else "cls", shell=True)
+    except Exception:
+        pass
     while True:
-        print("")
-        print(bold("  Main Menu"))
-        print("  " + cyan("1") + "  Trace an IP / hostname")
-        print("  " + cyan("2") + "  Look up a phone number")
-        print("  " + cyan("3") + "  Search social media / username")
-        print("  " + cyan("4") + "  About / legal notice")
-        print("  " + cyan("q") + "  Quit")
+        print(bold(BANNER))
+        print()
+        box("  RECON - Passive OSINT Toolkit" + chr(92) + "n  IP | Phone | Social", C.CYAN)
+        print()
+        print("  " + cyan(_BX["V"]) + "  " + bold("1") + "  " + cyan("IP") + dim("    Trace address / hostname"))
+        print("  " + cyan(_BX["V"]) + "  " + bold("2") + "  " + cyan("Phone") + dim("  Look up phone number"))
+        print("  " + cyan(_BX["V"]) + "  " + bold("3") + "  " + cyan("Social") + dim(" Search social media"))
+        print("  " + cyan(_BX["V"]) + "  " + bold("4") + "  " + cyan("About") + dim("  Legal info"))
+        print("  " + cyan(_BX["V"]) + "  " + bold("q") + "  " + dim(" Quit"))
+        print("  " + cyan(_BX["LT"]) + cyan(_BX["H"]) * 26)
         try:
-            choice = input(bold("  Pick: ")).strip().lower()
+            ch = input("  " + bold(">> ")).strip().lower()
         except (EOFError, KeyboardInterrupt):
-            print("")
+            print()
             break
-        if choice in ("q", "quit", "exit", ""):
+        if ch in ("q","quit","exit",""):
             break
-        if choice == "1":
-            try:
-                target = input(cyan("  target IP or hostname: ")).strip()
-            except (EOFError, KeyboardInterrupt):
-                print("")
-                continue
-            if not target:
-                continue
-            sub = argparse.Namespace(**vars(args))
-            sub.command = "ip"
-            sub.target = target
-            sub.no_whois = False
-            sub.trace = False
-            if not sub.yes:
-                if not acknowledge(args):
-                    print(red("acknowledgment required"))
-                    return 2
-            cmd_ip(sub)
-        elif choice == "2":
-            try:
-                num = input(cyan("  phone number (use '+' for intl): ")).strip()
-            except (EOFError, KeyboardInterrupt):
-                print("")
-                continue
-            if not num:
-                continue
-            sub = argparse.Namespace(**vars(args))
-            sub.command = "phone"
-            sub.number = num
-            sub.country = None
-            if not sub.yes:
-                if not acknowledge(args):
-                    print(red("acknowledgment required"))
-                    return 2
-            cmd_phone(sub)
-        elif choice == "3":
-            try:
-                query = input(cyan("  username or phone number: ")).strip()
-            except (EOFError, KeyboardInterrupt):
-                print("")
-                continue
-            if not query:
-                continue
-            sub = argparse.Namespace(**vars(args))
-            sub.command = "social"
-            sub.query = query
-            if not sub.yes:
-                if not acknowledge(args):
-                    print(red("acknowledgment required"))
-                    return 2
-            cmd_social(sub)
-        elif choice == "4":
+        if ch == "1":
+            t = ask("Enter IP or hostname")
+            if not t: continue
+            s = argparse.Namespace(**vars(args))
+            s.command = "ip"; s.target = t; s.no_whois = False; s.trace = False
+            if not s.yes and not acknowledge(args): continue
+            cmd_ip(s)
+            print()
+            input("  " + dim("Press Enter..."))
+        elif ch == "2":
+            n = ask("Phone number (use + for intl)")
+            if not n: continue
+            s = argparse.Namespace(**vars(args))
+            s.command = "phone"; s.number = n; s.country = None
+            if not s.yes and not acknowledge(args): continue
+            cmd_phone(s)
+            print()
+            input("  " + dim("Press Enter..."))
+        elif ch == "3":
+            q = ask("Username or phone number")
+            if not q: continue
+            s = argparse.Namespace(**vars(args))
+            s.command = "social"; s.query = q
+            if not s.yes and not acknowledge(args): continue
+            cmd_social(s)
+            print()
+            input("  " + dim("Press Enter..."))
+        elif ch == "4":
             print(red(DISCLAIMER))
-            print(dim("data sources: ip-api.com, ipwho.is, ipinfo.io, rdap.org"))
-            print(dim("system traceroute/whois (if installed), python-phonenumbers"))
-            print(dim("optional phone APIs: veriphone.io / abstractapi.com / numverify"))
+            print(dim("Sources: ip-api, ipwho, ipinfo, rdap.org"))
+            print(dim("Optional: pip install phonenumbers"))
+            input("  " + dim("Press Enter..."))
         else:
-            print(yellow("pick 1, 2, 3, 4, or q"))
-    print("")
+            warn("Pick 1-4 or q")
+    print()
     return 0
-
-
-
-# ---- social media account lookup -------------------------------------------
 
 SOCIAL_PLATFORMS = [
     ("Instagram", "https://www.instagram.com/{}/", "web", ""),
@@ -1009,7 +1066,6 @@ SOCIAL_PLATFORMS = [
     ("Behance", "https://www.behance.net/{}", "web", ""),
     ("Keybase", "https://keybase.io/{}", "web", ""),
     ("Flickr", "https://www.flickr.com/people/{}/", "web", ""),
-    ("Tumblr", "https://{}.tumblr.com", "dns", "subdomain"),
     ("Patreon", "https://www.patreon.com/{}", "web", ""),
     ("ProductHunt", "https://www.producthunt.com/@{}/", "web", ""),
     ("Hashnode", "https://hashnode.com/@{}/", "web", ""),
@@ -1021,18 +1077,14 @@ SOCIAL_PLATFORMS = [
     ("Linktree", "https://linktr.ee/{}", "web", ""),
     ("BuyMeACoffee", "https://www.buymeacoffee.com/{}", "web", ""),
     ("Kofi", "https://ko-fi.com/{}", "web", ""),
-    ("Carrd", "https://{}.carrd.co", "dns", "subdomain"),
     ("Bio.link", "https://bio.link/{}", "web", ""),
     ("Goodreads", "https://www.goodreads.com/{}", "web", ""),
     ("Last.fm", "https://www.last.fm/user/{}", "web", ""),
     ("SoundCloud", "https://soundcloud.com/{}", "web", ""),
-    ("Bandcamp", "https://{}.bandcamp.com", "dns", "subdomain"),
     ("VK", "https://vk.com/{}", "web", "Russian platform"),
     ("Weibo", "https://weibo.com/{}", "web", "Chinese platform"),
     ("Threads", "https://www.threads.net/@{}/", "web", ""),
 ]
-
-
 def social_check_web(platform, url):
     """Check if a profile URL exists via HTTP HEAD request."""
     req = urllib.request.Request(url, method="HEAD",
@@ -1084,7 +1136,7 @@ def print_social_results(results):
         print(dim("  No social media accounts found for this query"))
         return
     print("")
-    print(bold(cyan("SOCIAL MEDIA ACCOUNTS")))
+    hdr("SOCIAL MEDIA ACCOUNTS")
     for entry in found:
         url = entry.get("url", "")
         plat = entry.get("platform", "")
