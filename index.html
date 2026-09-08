@@ -237,6 +237,71 @@
   .pill{display:inline-block;font-size:9px;letter-spacing:.14em;padding:2px 7px;border-radius:999px;
     border:1px solid var(--line);color:var(--body);margin-left:6px;text-transform:uppercase}
   .pill.free{color:#6fffe0;border-color:rgba(111,255,224,.5)}
+
+  /* ---------- live conversation panel ---------- */
+  #livefab{position:fixed;right:clamp(12px,2.4vw,26px);bottom:88px;z-index:31;
+    width:54px;height:54px;border-radius:50%;border:1px solid var(--line);
+    background:var(--panel);color:var(--bright);cursor:pointer;font:inherit;
+    font-size:9px;letter-spacing:.1em;font-weight:700;
+    box-shadow:0 0 24px rgba(111,255,224,.18);display:flex;align-items:center;justify-content:center;
+    transition:all .2s}
+  #livefab:hover{border-color:var(--bright);box-shadow:0 0 30px rgba(111,255,224,.35)}
+  #livefab.on{border-color:rgba(255,120,120,.7);color:#ffb3b3;box-shadow:0 0 30px rgba(255,90,90,.35)}
+
+  #livebox{position:fixed;right:clamp(12px,2.4vw,26px);top:120px;bottom:300px;
+    width:min(340px,32vw);z-index:33;display:flex;flex-direction:column;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    backdrop-filter:blur(9px);box-shadow:0 0 60px rgba(4,7,13,.8);overflow:hidden;
+    transform:translateX(140%);opacity:0;visibility:hidden;pointer-events:none;
+    transition:transform .28s ease,opacity .28s ease,visibility .28s}
+  #livebox.open{transform:none;opacity:1;visibility:visible;pointer-events:auto}
+  .live-head{display:flex;justify-content:space-between;align-items:center;
+    padding:11px 14px;border-bottom:1px solid var(--line);flex:0 0 auto;
+    font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--body)}
+  .live-head b{color:var(--bright);font-weight:700;letter-spacing:.16em}
+  .live-head .x{cursor:pointer;color:var(--body);border:1px solid var(--line);
+    border-radius:6px;padding:2px 9px;font-size:11px;background:none;font-family:inherit}
+  .live-head .x:hover{color:var(--bright);border-color:var(--bright)}
+  #livestate{padding:8px 14px;font-size:10px;letter-spacing:.1em;color:var(--body);
+    border-bottom:1px solid var(--line);text-transform:uppercase}
+  .live-row{display:flex;gap:6px;padding:9px 10px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .live-row select{flex:1;min-width:110px;background:rgba(4,7,13,.55);border:1px solid var(--line);
+    border-radius:8px;padding:7px 9px;color:var(--bright);font:inherit;font-size:11px;outline:none}
+  .live-row select option{background:#061116}
+  .live-row button{padding:7px 11px;border-radius:8px;border:1px solid var(--line);
+    background:rgba(47,143,136,.16);color:var(--bright);cursor:pointer;font:inherit;
+    font-size:9px;letter-spacing:.16em;font-weight:700;transition:all .18s}
+  .live-row button:hover{border-color:var(--bright);box-shadow:0 0 14px rgba(111,255,224,.22)}
+  .live-row button.ghost{background:none;color:var(--body)}
+  .live-row button.danger{border-color:rgba(255,120,120,.5);color:#ffb3b3;background:rgba(60,10,14,.4)}
+  #livetranscript{flex:1 1 auto;overflow-y:auto;padding:11px 12px;display:flex;
+    flex-direction:column;gap:8px;scrollbar-width:thin;scrollbar-color:var(--body) transparent}
+  #livetranscript::-webkit-scrollbar{width:6px}
+  #livetranscript::-webkit-scrollbar-thumb{background:var(--body);border-radius:3px}
+  .tl{display:flex;flex-direction:column;gap:2px;max-width:96%}
+  .tl .who{font-size:8px;letter-spacing:.16em;text-transform:uppercase;color:var(--body)}
+  .tl .b{padding:6px 10px;border-radius:10px;font-size:11.5px;line-height:1.5;
+    white-space:pre-wrap;word-break:break-word}
+  .tl.them{align-self:flex-start}
+  .tl.them .b{background:rgba(255,196,107,.10);border:1px solid rgba(255,196,107,.34);color:#ffe6c2}
+  .tl.jarvis{align-self:flex-end;text-align:right}
+  .tl.jarvis .b{background:rgba(47,143,136,.14);border:1px solid var(--line);color:#a9d8d0}
+  .tl.system{align-self:center}
+  .tl.system .b{color:var(--body);font-style:italic;font-size:10px}
+  .live-input{display:flex;gap:8px;padding:10px;border-top:1px solid var(--line);flex:0 0 auto}
+  #livein{flex:1;min-width:0;background:rgba(4,7,13,.55);border:1px solid var(--line);
+    border-radius:10px;padding:0 12px;color:var(--bright);font:inherit;font-size:12px;
+    outline:none;height:40px}
+  #livein:focus{border-color:var(--bright);box-shadow:0 0 14px rgba(111,255,224,.18)}
+  #livesend{width:46px;flex:0 0 46px;border-radius:10px;border:1px solid var(--line);
+    background:rgba(47,143,136,.18);color:var(--bright);cursor:pointer;font-size:15px}
+  #livesend:hover{background:rgba(111,255,224,.18);border-color:var(--bright)}
+  #livebadge{color:#ffb3b3;font-size:9px;letter-spacing:.2em;text-transform:uppercase;
+    animation:pulseText 1.6s ease-in-out infinite}
+  @keyframes pulseText{0%,100%{opacity:.45}50%{opacity:1}}
+  @media (max-width:820px){
+    #livebox{top:0;bottom:0;right:0;left:0;width:auto;border-radius:0;border:none}
+  }
 </style>
 </head>
 <body>
@@ -258,6 +323,7 @@
       <div id="datestamp">—</div>
       <div><span id="dot"></span><span id="statustext">connecting to local core…</span></div>
       <div id="actline"></div>
+      <div id="livebadge" hidden>&#9679; live</div>
     </div>
   </div>
 
@@ -276,18 +342,20 @@
     </div>
 
     <div class="chips">
+      <div class="chip">call mode on discord</div>
+      <div class="chip">talk to them</div>
+      <div class="chip">stop talking</div>
+      <div class="chip">chat mode on whatsapp</div>
+      <div class="chip">read the chat</div>
       <div class="chip">draw a circle</div>
       <div class="chip">draw a cat</div>
       <div class="chip">make a robot</div>
       <div class="chip">make a 3d vase</div>
       <div class="chip">move the mouse to the center</div>
+      <div class="chip">audio devices</div>
+      <div class="chip">what call is this</div>
       <div class="chip">open paint</div>
-      <div class="chip">search youtube lofi beats</div>
-      <div class="chip">what time is it</div>
-      <div class="chip">system status</div>
       <div class="chip">screenshot</div>
-      <div class="chip">volume up</div>
-      <div class="chip">open url google.com</div>
       <div class="chip">help</div>
     </div>
 
@@ -326,6 +394,43 @@
   <div class="chat-input">
     <input id="chatin2" type="text" autocomplete="off" placeholder="Chat with Richie Jarvis…">
     <button id="chatsend" title="Send">&#10148;</button>
+  </div>
+</div>
+
+<button id="livefab" title="Live call / chat assistant">LIVE</button>
+
+<div id="livebox" aria-label="Live conversation panel">
+  <div class="live-head">
+    <b>LIVE CONVERSATION</b>
+    <button class="x" id="liveclose" title="Close">ESC</button>
+  </div>
+  <div id="livestate">not in a conversation</div>
+
+  <div class="live-row">
+    <select id="liveApp" title="Which app to talk through">
+      <option value="">auto-detect app</option>
+      <option value="whatsapp">WhatsApp</option>
+      <option value="discord">Discord</option>
+      <option value="telegram">Telegram</option>
+      <option value="zoom">Zoom</option>
+      <option value="meet">Google Meet</option>
+      <option value="teams">Teams</option>
+      <option value="messenger">Messenger</option>
+    </select>
+    <button id="liveCall">JOIN CALL</button>
+    <button id="liveChat">WATCH CHAT</button>
+  </div>
+  <div class="live-row">
+    <button id="liveMute">MUTE</button>
+    <button id="liveRead">READ CHAT</button>
+    <button id="liveStop" class="danger">LEAVE</button>
+  </div>
+
+  <div id="livetranscript"></div>
+
+  <div class="live-input">
+    <input id="livein" type="text" autocomplete="off" placeholder="Type a line for Jarvis to say…">
+    <button id="livesend" title="Say it now">&#10148;</button>
   </div>
 </div>
 
@@ -1012,7 +1117,7 @@ addEventListener('keydown',e=>{
   if(e.key===' '){ e.preventDefault(); armMic(); }
   if(e.key==='/'){ e.preventDefault(); $('chatin').focus(); }
   if(e.key==='Escape'){
-    stopSpeaking(); armed=false; setListening(false); $('modal').hidden=true;
+    stopSpeaking(); armed=false; setListening(false); $('modal').hidden=true; setLive(false);
     fetch('/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
   }
   if(e.key==='ArrowRight') FACE.next();
@@ -1089,6 +1194,116 @@ chatIn.addEventListener('keydown', e=>{
   if(e.key==='Enter'){ e.preventDefault(); sendChat(); }
   if(e.key==='Escape'){ e.preventDefault(); setChat(false); }
 });
+
+/* ============================================================
+   7. Live conversation — take a call or hold a chat for the boss
+   ============================================================ */
+const liveEl=$('livebox'), liveLog=$('livetranscript');
+let liveOpen=false, lastLiveCount=0;
+
+function setLive(open){
+  liveOpen=open;
+  liveEl.classList.toggle('open',open);
+  if(open){ refreshLive(); $('livein').focus(); }
+}
+$('livefab').addEventListener('click',()=>setLive(!liveOpen));
+$('liveclose').addEventListener('click',()=>setLive(false));
+
+async function refreshLive(){
+  try{
+    const s=await (await fetch('/session')).json();
+    renderLive(s);
+  }catch(e){}
+}
+
+function renderLive(s){
+  const active=!!s.active;
+  $('livefab').classList.toggle('on',active);
+  $('livebadge').hidden=!active;
+  if(!active){
+    $('livestate').textContent='not in a conversation';
+    if(lastLiveCount){ liveLog.innerHTML=''; lastLiveCount=0; }
+    return;
+  }
+  $('livestate').textContent =
+    (s.kind||'')+' · '+(s.app||'?')+' · '+(s.who||'them')+' · '+(s.turns||0)+' turns'+
+    ' · '+(s.age<60 ? Math.round(s.age)+'s' : Math.floor(s.age/60)+'m');
+  const list=s.transcript||[];
+  if(list.length===lastLiveCount) return;
+  liveLog.innerHTML='';
+  list.forEach(e=>{
+    const d=document.createElement('div');
+    const who=String(e.who||'').toLowerCase();
+    d.className='tl '+(who.indexOf('jarvis')===0 ? 'jarvis' : (who==='system' ? 'system' : 'them'));
+    const w=document.createElement('div'); w.className='who'; w.textContent=e.who;
+    const b=document.createElement('div'); b.className='b'; b.textContent=e.text;
+    d.appendChild(w); d.appendChild(b);
+    liveLog.appendChild(d);
+  });
+  liveLog.scrollTop=liveLog.scrollHeight;
+  lastLiveCount=list.length;
+}
+
+async function liveStart(kind){
+  const app=$('liveApp').value||'';
+  try{
+    const d=await (await fetch('/session/start',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({kind,app})})).json();
+    typeOut($('reply'), d.speak || ('Live '+kind+' started.'));
+    log('jarvis','system', d.speak || ('live '+kind));
+    refreshLive();
+  }catch(e){ typeOut($('reply'),'Could not start - is the local core running?'); }
+}
+$('liveCall').addEventListener('click',()=>liveStart('call'));
+$('liveChat').addEventListener('click',()=>liveStart('chat'));
+
+$('liveStop').addEventListener('click',async()=>{
+  try{
+    await fetch('/session/stop',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:'{}'});
+  }catch(e){}
+  typeOut($('reply'),'Left the conversation.');
+  refreshLive();
+});
+
+$('liveMute').addEventListener('click',async()=>{
+  const on=!$('liveMute').classList.contains('on');
+  $('liveMute').classList.toggle('on',on);
+  $('liveMute').textContent=on?'UNMUTE':'MUTE';
+  try{
+    await fetch('/session/mute',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({muted:on})});
+  }catch(e){}
+});
+
+$('liveRead').addEventListener('click',async()=>{
+  typeOut($('reply'),'Reading the chat…');
+  try{
+    const d=await (await fetch('/chat/read',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({app:$('liveApp').value||''})})).json();
+    const t=(d.text||'').trim();
+    typeOut($('reply'), t
+      ? t.split('\n').filter(x=>x.trim()).slice(-4).join(' / ').slice(0,420)
+      : ('I could not read that chat. '+(d.error||'')));
+  }catch(e){ typeOut($('reply'),'Could not read the chat - is the core running?'); }
+});
+
+async function liveSay(){
+  const v=$('livein').value.trim();
+  if(!v) return;
+  $('livein').value='';
+  try{
+    const d=await (await fetch('/session/say',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({text:v})})).json();
+    if(d.ok){ refreshLive(); blip(760,.09); }
+    else typeOut($('reply'), (d.error||'no live session') + ' — press JOIN CALL first.');
+  }catch(e){ typeOut($('reply'),'Local core unreachable.'); }
+}
+$('livesend').addEventListener('click',liveSay);
+$('livein').addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();liveSay();} });
+setInterval(refreshLive,3000);
 
 /* boot */
 (function boot(){

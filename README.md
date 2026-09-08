@@ -71,6 +71,50 @@ Say it, type it, or use the chips under the input box.
 * **Secretary / call mode** — `secretary mode on` auto-answers incoming calls
   and speaks a message; `listen mode on` uses Vosk to hear the call audio.
 
+## Talking to people for you
+
+Jarvis can sit in a conversation and answer as you, in a call or a chat.
+Open the **LIVE** panel (the button above the AI chat bubble) or just say it.
+
+| Say | What happens |
+|---|---|
+| `call mode on discord` / `talk to them` | Jarvis joins the live audio and answers out loud |
+| `stop talking` / `i'll take over` | leaves the conversation |
+| `go quiet` / `you can talk` | mutes/unmutes Jarvis *inside* the call (not your mic) |
+| `chat mode on whatsapp` / `chat with dad` | watches that chat and replies as you |
+| `read the chat` | scrapes the visible conversation to the clipboard and reads it back |
+| `reply <text>` | types and sends to the focused chat |
+| `what call is this` | lists windows that look like live calls |
+
+Supported apps: WhatsApp, Discord, Telegram, Zoom, Google Meet, Teams,
+Messenger. Detection reads window titles, so it is a heuristic — the LIVE
+panel shows the confidence and lets you pick the app yourself.
+
+### Being heard inside a call
+
+Voice calls need one extra piece of plumbing: an app cannot hear Jarvis
+unless Jarvis speaks into that app's microphone. On Windows you do that with
+a free virtual audio cable:
+
+1. Install [VB-CABLE](https://vb-audio.com/Cable/) (donationware, no account).
+2. In Discord/WhatsApp/Zoom, set the **input/microphone** device to
+   `CABLE Output`.
+3. Say `audio devices`, then `use audio device CABLE Input`
+   (or pick it in the LIVE panel). Jarvis now speaks straight into the call.
+
+Without a cable Jarvis still hears and answers — you just hear it on your
+speakers and the other person does not.
+
+### How chat reading works
+
+There is no reliable cross-app chat API, so Jarvis focuses the window and
+uses select-all + copy, then **restores whatever was on your clipboard**.
+Two guards: it never scrapes while a different app is in front, and it stops
+after `max_turns` replies.
+
+Text chats need `listen mode` off; voice calls need it **on** (that is the
+loopback capture that hears the other person).
+
 ## Safety
 
 An AI moving your mouse needs brakes:

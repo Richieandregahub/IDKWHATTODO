@@ -4,6 +4,7 @@ import math
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -34,6 +35,16 @@ try:
 except Exception as _e:            # pragma: no cover
     m3d = None
     print("[jarvis] model3d.py unavailable:", _e)
+try:
+    import apps as appslib
+except Exception as _e:            # pragma: no cover
+    appslib = None
+    print("[jarvis] apps.py unavailable:", _e)
+try:
+    import converse as converselib
+except Exception as _e:            # pragma: no cover
+    converselib = None
+    print("[jarvis] converse.py unavailable:", _e)
 
 
 def _pyautogui():
@@ -151,6 +162,9 @@ DEFAULT_CONFIG = {
     "failsafe": True,        # corner-of-screen mouse abort
     "speed": 1.0,            # mouse speed multiplier
     "max_actions": 6,        # cap on chained actions per command
+    "voice_device": "",      # empty = default speakers; set a cable to be heard in calls
+    "auto_converse": True,   # keep talking after secretary mode answers a call
+    "chat_poll": 6.0,        # seconds between chat checks in chat mode
 }
 
 
@@ -352,6 +366,27 @@ def build_tools():
               {"text": {"type": "string", "description": "text to copy"}}, ["text"]),
         _tool("wait", "Pause before the next action (lets apps finish opening).",
               {"seconds": {"type": "number", "description": "seconds to wait (max 10)"}}, ["seconds"]),
+        _tool("call", "Start or stop talking for the user inside a live voice/video call "
+                      "(WhatsApp, Discord, Teams, Zoom, Meet). Jarvis listens to the call "
+                      "and answers out loud.",
+              {"op": _enum(["start", "stop", "status", "say", "mute", "unmute"]),
+               "app": _enum(["whatsapp", "discord", "telegram", "zoom", "meet",
+                             "teams", "messenger"]),
+               "who": {"type": "string", "description": "who is on the call, if known"},
+               "text": {"type": "string", "description": "line to say (op=say)"}},
+              ["op"]),
+        _tool("chat", "Read or reply in the chat window that is open right now.",
+              {"op": _enum(["read", "send", "auto"]),
+               "app": _enum(["whatsapp", "discord", "telegram", "zoom", "meet",
+                             "teams", "messenger"]),
+               "text": {"type": "string", "description": "message to send (op=send)"},
+               "on": {"type": "boolean", "description": "true to keep replying (op=auto)"}},
+              ["op"]),
+        _tool("audio", "List playback devices or pick the one Jarvis speaks through.",
+              {"op": _enum(["list", "use"]),
+               "device": {"type": "string",
+                          "description": "device name, e.g. 'CABLE Input' (op=use)"}},
+              ["op"]),
         _tool("screenshot", "Take a screenshot and save it to the desktop.", {}),
         _tool("system_info", "Report the time, date, CPU, memory and battery.", {}),
         _tool("say_aloud", "Speak a sentence through the PC speakers.",
@@ -934,6 +969,10 @@ class _RECT(ctypes.Structure):
 
 def enum_windows():
     """All visible windows: ``[{'hwnd', 'title', 'rect'}]`` (rect = x,y,w,h)."""
+    if appslib is not None:
+        return appslib.windows()
+    if os.name != "nt":
+        return []
     user32 = ctypes.windll.user32
     out = []
     proto = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
@@ -957,6 +996,8 @@ def enum_windows():
 
 def find_window(title):
     """Best-effort match of a window by (part of) its title."""
+    if appslib is not None:
+        return appslib.find_window(title)
     needle = str(title or "").strip().lower()
     wins = [w for w in enum_windows() if w["title"]]
     if not needle:
@@ -1167,6 +1208,79 @@ def _dispatch(name, params):
             return send_whatsapp_message(s("contact"), s("message"))
         if name == "clipboard":
             return clipboard_action(s("text"))
+        if name == "call":
+            op = s("op", "status")
+            if op == "start":
+                _state["abort"] = False
+                return start_session("call", app=s("app"), who=s("who"))[1]
+            if op == "stop":
+                stop_session()
+                return "I stopped talking. The call is yours again."
+            if op == "say":
+                text = s("text")
+                if not text:
+                    return "Tell me what to say."
+                if not (_ENGINE and _ENGINE.active):
+                    return "I am not in a call. Say 'call mode on' first."
+                engine().say(text)
+                return "Said: %s" % text
+            if op in ("mute", "unmute"):
+                if not (_ENGINE and _ENGINE.active):
+                    return "There is no call to mute."
+                engine().session.muted = (op == "mute")
+                return "I will %s from now on." % ("stay quiet" if op == "mute" else "speak again")
+            st = session_state()
+            return ("No call session." if not st.get("active")
+                    else "Talking in %s with %s, %d turns so far."
+                         % (st.get("app") or "?", st.get("who") or "them", st.get("turns", 0)))
+        if name == "chat":
+            op = s("op", "read")
+            app = s("app") or (appslib.active_app() if appslib else "") or ""
+            if op == "read":
+                res = appslib.read_chat(app=app) if appslib else {"ok": False, "text": ""}
+                text = (res.get("text") or "").strip()
+                if not text:
+                    return "I could not read that chat. %s" % (res.get("error") or "")
+                tail = "\n".join([l for l in text.splitlines() if l.strip()][-8:])
+                return "Latest from %s:\n%s" % (res.get("app") or app or "the chat", tail[:900])
+            if op == "send":
+                text = s("text")
+                if not text:
+                    return "Give me a message to send."
+                res = appslib.send_chat_text(text, app=app) if appslib else \
+                    {"ok": True, "app": app}
+                return "Sent to %s: %s" % (res.get("app") or app or "the chat", text)
+            if op == "auto":
+                on = params.get("on", True)
+                if on:
+                    _state["abort"] = False
+                    return start_session("chat", app=app)[1]
+                stop_session()
+                return "I stopped watching the chat."
+            return "Unknown chat operation."
+        if name == "audio":
+            if s("op", "list") == "use":
+                dev = s("device")
+                if not dev:
+                    return "Name the device to use."
+                idx, resolved = find_output_device(dev)
+                if idx is None:
+                    known = audio_devices().get("devices") or []
+                    names = ", ".join(d["name"] for d in known[:6]) or "none found"
+                    return "I cannot find an output device called %s. I see: %s" % (dev, names)
+                cfg = load_config()
+                cfg["voice_device"] = resolved
+                save_config(cfg)
+                return "Speaking through %s from now on." % resolved
+            info = audio_devices()
+            if info.get("error"):
+                return "I could not list audio devices. %s" % info["error"]
+            devs = info.get("devices") or []
+            if not devs:
+                return "No playback devices found."
+            return "Playback devices: " + ", ".join(
+                d["name"] + (" (virtual cable)" if d.get("virtual") else "")
+                for d in devs[:8])
         if name == "wait":
             secs = max(0.0, min(10.0, float(n("seconds", 1) or 1)))
             if _aborted():
@@ -1290,7 +1404,14 @@ def search_web(query, engine="google"):
     return f"Searching {where} for {query}."
 
 
-def _speak_aloud(text):
+def _speak_aloud(text, device=None):
+    # if an output device is configured (e.g. a virtual cable), speak into it
+    # so the other side of a call can hear us; otherwise use the speakers
+    try:
+        if speak_through_device(text, device):
+            return
+    except Exception as e:
+        print("[jarvis] routed speech failed, falling back:", e)
     try:
         esc = str(text).replace("'", "''")
         ps = (f"Add-Type -AssemblyName System.Speech; "
@@ -1404,6 +1525,11 @@ def _secretary_loop():
         time.sleep(4)
         _speak_aloud(f"Hello! You are talking with Richie Jarvis, {owner}'s AI assistant. "
                      f"{owner} is not available right now. Please leave your name and your message.")
+        if load_config().get("auto_converse", True) and appslib is not None \
+                and not (_ENGINE is not None and _ENGINE.active):
+            title = hits[0] if hits else ""
+            start_session("call", app=appslib.active_app() or appslib.match_app(title) or "",
+                          who=_guess_who(title))
         time.sleep(25)
 
 
@@ -1526,12 +1652,17 @@ def _listen_loop():
                             talking = False
                             if txt and len(txt.split()) >= 1:
                                 print(f"[jarvis] SYSTEM AUDIO heard: {txt!r}")
-                                reply = parse_command(txt)
-                                if reply is None:
-                                    reply = llm_reply(txt)
-                                print(f"[jarvis] CALL ASSISTANT says: {reply!r}")
-                                if reply:
-                                    _talk_aloud_guarded(reply)
+                                if _ENGINE is not None and _ENGINE.active:
+                                    # a live call/chat session owns the conversation
+                                    # and speaks for itself
+                                    engine().hear(txt)
+                                else:
+                                    reply = parse_command(txt)
+                                    if reply is None:
+                                        reply = llm_reply(txt)
+                                    print(f"[jarvis] CALL ASSISTANT says: {reply!r}")
+                                    if reply:
+                                        _talk_aloud_guarded(reply)
                 stream.stop_stream()
                 stream.close()
                 stream = None
@@ -1789,6 +1920,105 @@ def parse_command(text):
     t = text.strip().lower()
     t = re.sub(r"\b(jarvis|hey jarvis|ok jarvis|richie|hey richie|richie jarvis|ok richie jarvis)\b", "", t).strip(" ,.!?")
 
+    # ---- live conversation: calls and chats -----------------------------
+    # These come before the generic "stop" rule so "stop talking" ends the
+    # conversation instead of everything else.
+    m = re.match(r"^(?:call|conversation|talk)(?:\s+mode)?\s+(on|off|start|stop)"
+                 r"(?:\s+(?:on|in|for)?\s*(whatsapp|discord|telegram|zoom|meet|teams|messenger))?$", t)
+    if m:
+        if m.group(1) in ("on", "start"):
+            _state["abort"] = False
+            return start_session("call", app=m.group(2) or "")[1]
+        stop_session()
+        return "I stopped talking. The call is all yours again."
+
+    if re.search(r"^(?:talk to (?:them|him|her|the person)|answer (?:it|for me|the call)|"
+                 r"take (?:the|this) call|you (?:talk|speak|handle it|take over)|"
+                 r"handle (?:this|the) call|speak for me)\b", t):
+        _state["abort"] = False
+        return start_session("call")[1]
+
+    if re.search(r"^(?:stop talking|i(?:'ll| will| am gonna)? ?take (?:it|over|from here)|"
+                 r"my turn|that's enough|thats enough)\b", t):
+        stop_session()
+        return "Understood, I am out of the conversation."
+
+    if re.search(r"^(?:go quiet|stay quiet|mute yourself|stop answering)\b", t):
+        if _ENGINE and _ENGINE.active:
+            _ENGINE.session.muted = True
+            return "I will stay quiet unless you ask me to say something."
+        return "There is no call for me to go quiet in."
+
+    if re.search(r"^(?:you can talk|speak again|unmute yourself|start answering)\b", t):
+        if _ENGINE and _ENGINE.active:
+            _ENGINE.session.muted = False
+            return "I am back in the conversation."
+        return "There is no call to rejoin. Say 'call mode on' first."
+
+    m = re.match(r"^chat(?:\s+mode)?\s+(on|off|start|stop)"
+                 r"(?:\s+(?:on|in|with)?\s*(whatsapp|discord|telegram|zoom|meet|teams|messenger|[a-z]+))?$", t)
+    if m:
+        if m.group(1) in ("on", "start"):
+            app = m.group(2) or ""
+            if app and app not in (appslib.APP_PROFILES if appslib else {}):
+                # sounds like a person, not an app: open their chat first
+                name, num = resolve_contact(app)
+                if num:
+                    send_whatsapp_message(num, "")
+                    time.sleep(3)
+                    app = "whatsapp"
+            _state["abort"] = False
+            return start_session("chat", app=app)[1]
+        stop_session()
+        return "I stopped watching the chat."
+
+    if re.match(r"^(?:read|check)\s+(?:the\s+)?(?:chat|messages?|conversation|last messages?)$", t):
+        res = appslib.read_chat() if appslib else {"ok": False, "text": "", "error": "apps.py missing"}
+        text = (res.get("text") or "").strip()
+        if not text:
+            return "I could not read the chat. %s" % (res.get("error") or "")
+        tail = "\n".join([l for l in text.splitlines() if l.strip()][-6:])
+        _set_artifact("chat", "chat · %s" % (res.get("app") or "unknown"),
+                      "%d characters read" % len(text),
+                      svg="", path="")
+        return "Latest from %s: %s" % (res.get("app") or "the chat", tail[:600])
+
+    m = re.match(r"^(?:reply|respond|say back|answer)\s+(.+)$", t)
+    if m:
+        text = m.group(1).strip()
+        res = appslib.send_chat_text(text) if appslib else {"ok": True, "app": ""}
+        return "Replied in %s: %s" % (res.get("app") or "the chat", text)
+
+    if re.search(r"^(?:what|which)\s+(?:call|calls?)(\s+is\s+(?:this|live|on))?$", t) or \
+       re.search(r"^am i (?:in|on) a call$", t):
+        if not appslib:
+            return "Call detection is unavailable."
+        calls = appslib.detect_calls(appslib.windows())
+        if not calls:
+            return "I cannot see a call right now."
+        return "Looks like: " + ", ".join(
+            "%s (%s) - %s" % (c["title"][:40], c["app"], c["confidence"]) for c in calls[:3])
+
+    if re.search(r"^(?:list\s+)?(?:audio|sound)\s*devices?$", t):
+        info = audio_devices()
+        if info.get("error") or not info.get("devices"):
+            return "I could not list audio devices. %s" % (info.get("error") or "")
+        return "Playback devices: " + ", ".join(
+            d["name"] + (" [cable]" if d.get("virtual") else "")
+            for d in info["devices"][:8])
+
+    m = re.match(r"^(?:use|speak (?:through|on|via)|set)\s+(?:the\s+)?(?:audio\s+)?device\s+(.+)$", t)
+    if m:
+        idx, resolved = find_output_device(m.group(1))
+        if idx is None:
+            known = audio_devices().get("devices") or []
+            return "I cannot find a device called %s. I see: %s" % (
+                m.group(1), ", ".join(d["name"] for d in known[:6]) or "nothing")
+        cfg = load_config()
+        cfg["voice_device"] = resolved
+        save_config(cfg)
+        return "Speaking through %s from now on." % resolved
+
     # ---- emergency stop -------------------------------------------------
     if re.search(r"^(?:stop|abort|halt|freeze|cancel|emergency)\b", t):
         _state["abort"] = True
@@ -2013,6 +2243,295 @@ def parse_command(text):
     return None
 
 
+# --------------------------------------------------------------------------
+# audio routing
+#
+# To be heard inside a call, Jarvis has to speak into the app's microphone.
+# On Windows that means a virtual audio cable (VB-CABLE / VoiceMeeter): the
+# app uses "CABLE Output" as its mic, and Jarvis plays to "CABLE Input".
+# System.Speech can only pick the default device, so we synthesise to a WAV
+# and play it through the device we want with pyaudiowpatch.
+# --------------------------------------------------------------------------
+
+def audio_devices():
+    """Playback devices, with virtual cables flagged."""
+    try:
+        import pyaudiowpatch as pw
+    except Exception as e:
+        return {"devices": [], "error": "pyaudiowpatch is not installed (%s)" % e}
+    out = []
+    try:
+        with pw.PyAudio() as pa:
+            default = -1
+            try:
+                wasapi = pa.get_host_api_info_by_type(pw.paWASAPI)
+                default = int(wasapi.get("defaultOutputDevice", -1))
+            except Exception:
+                pass
+            for i in range(pa.get_device_count()):
+                info = pa.get_device_info_by_index(i)
+                if int(info.get("maxOutputChannels", 0) or 0) <= 0:
+                    continue
+                name = str(info.get("name", "") or "")
+                out.append({
+                    "index": i,
+                    "name": name,
+                    "channels": int(info.get("maxOutputChannels", 0) or 0),
+                    "rate": int(info.get("defaultSampleRate", 0) or 0),
+                    "default": i == default,
+                    "virtual": bool(re.search(r"cable|voicemeeter|virtual|vb-audio|mix",
+                                              name, re.I)),
+                })
+    except Exception as e:
+        return {"devices": out, "error": str(e)}
+    return {"devices": out, "error": ""}
+
+
+def find_output_device(want):
+    """Resolve a device name (or substring) to ``(index, name)``."""
+    want = str(want or "").strip().lower()
+    if not want:
+        return None, None
+    info = audio_devices()
+    devices = info.get("devices") or []
+    for d in devices:
+        if d["name"].lower() == want:
+            return d["index"], d["name"]
+    for d in devices:
+        if want in d["name"].lower():
+            return d["index"], d["name"]
+    return None, None
+
+
+def _tts_to_wav(text, path):
+    """Synthesise speech into a WAV file using the Windows voice."""
+    esc = str(text).replace("'", "''")
+    ps = ("Add-Type -AssemblyName System.Speech; "
+          "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+          "$s.Rate = 0; $s.SetOutputToWaveFile('%s'); $s.Speak('%s'); $s.Dispose()"
+          % (path.replace("'", "''"), esc))
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                        "-Command", ps], creationflags=flags, timeout=120,
+                       capture_output=True)
+    except Exception as e:
+        print("[jarvis] wav synth failed:", e)
+        return False
+    return os.path.isfile(path) and os.path.getsize(path) > 1024
+
+
+def speak_through_device(text, device=None):
+    """Speak into a specific output device. False = caller should fall back."""
+    want = (device or load_config().get("voice_device") or "").strip()
+    if not want:
+        return False
+    idx, name = find_output_device(want)
+    if idx is None:
+        print("[jarvis] audio device %r not found - using the default" % want)
+        return False
+    try:
+        import pyaudiowpatch as pw
+        import wave
+    except Exception:
+        return False
+    tmp = os.path.join(tempfile.gettempdir(), "jarvis_say_%d.wav" % int(time.time() * 1000))
+    try:
+        if not _tts_to_wav(text, tmp):
+            return False
+        with wave.open(tmp, "rb") as wf:
+            with pw.PyAudio() as pa:
+                stream = pa.open(
+                    format=pa.get_format_from_width(wf.getsampwidth()),
+                    channels=wf.getnchannels(),
+                    rate=wf.getframerate(),
+                    output=True, output_device_index=idx)
+                try:
+                    data = wf.readframes(4096)
+                    while data:
+                        if _state.get("abort"):
+                            break
+                        stream.write(data)
+                        data = wf.readframes(4096)
+                finally:
+                    stream.stop_stream()
+                    stream.close()
+        return True
+    except Exception as e:
+        print("[jarvis] device playback failed:", e)
+        return False
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------
+# live conversation sessions (calls and chats)
+# --------------------------------------------------------------------------
+
+_ENGINE = None
+_CHAT_POLL = {"thread": None}
+
+
+def _session_brain(system, history, prompt):
+    """Ask the configured brain for the next line of the conversation."""
+    cfg = load_config()
+    messages = [{"role": "system", "content": system}]
+    for who, text in history:
+        role = "assistant" if str(who).lower().startswith("jarvis") else "user"
+        if role == "user":
+            messages.append({"role": "user", "content": text})
+        else:
+            messages.append({"role": "assistant", "content": text})
+    messages.append({"role": "user", "content": prompt})
+    msg, err = _call_brain(messages, cfg, max_tokens=140, temperature=0.75)
+    if msg is None:
+        raise RuntimeError(err or "brain unavailable")
+    reply = (msg.get("content") or "").strip()
+    # models sometimes wrap the line in quotes or fences
+    reply = re.sub(r"^```[a-zA-Z]*\n?", "", reply)
+    reply = re.sub(r"\n?```$", "", reply).strip().strip('"').strip()
+    return reply.split("\n")[0].strip() or reply
+
+
+def _session_speak(text):
+    # guarded: it mutes the loopback while we talk so the mic does not
+    # transcribe Jarvis's own voice and answer itself
+    _talk_aloud_guarded(text)
+
+
+def _session_send(text):
+    app = (engine().session.app if engine().session else "") or ""
+    if appslib:
+        appslib.send_chat_text(text, app=app)
+    else:                # pragma: no cover
+        send_chat(text)
+
+
+def engine():
+    global _ENGINE
+    if _ENGINE is None:
+        if converselib is None:      # pragma: no cover
+            raise RuntimeError("converse.py is missing")
+        _ENGINE = converselib.ConversationEngine(
+            brain=_session_brain, speak=_session_speak, send=_session_send,
+            owner=contact_owner(), log=lambda m: print("[jarvis] session:", m))
+    return _ENGINE
+
+
+def start_session(kind="call", app="", who="", medium=""):
+    """Begin talking for you. Returns (session_dict, spoken_confirmation)."""
+    eng = engine()
+    app = (app or appslib.active_app() if appslib else app) or ""
+    if not who:
+        calls = appslib.detect_calls(appslib.windows()) if appslib else []
+        for c in calls:
+            if not app or c["app"] == app:
+                who = _guess_who(c.get("title") or "")
+                break
+    sess = eng.start(kind=kind, app=app, who=who, medium=medium or kind)
+    _state["session"] = True
+    if kind == "chat" and app:
+        _start_chat_poll(app)
+    label = (appslib.profile(app).get("label") if appslib else app) or app or "the call"
+    return sess.status(), ("I am on it. I will talk to them in %s. "
+                           "Say stop talking when you want me out." % label)
+
+
+def stop_session():
+    eng = engine()
+    sess = eng.stop()
+    _state["session"] = False
+    turns = sess.turns if sess else 0
+    return {"stopped": True, "turns": turns}
+
+
+def _guess_who(title):
+    """Pull a plausible person/channel name out of a call window title."""
+    t = re.sub(r"\s*[-|]\s*(whatsapp|discord|zoom|meet|teams|telegram|messenger)\s*$",
+               "", str(title or ""), flags=re.I)
+    t = re.sub(r"^\s*(whatsapp|discord|zoom|meet|teams|telegram|messenger)\s*[-|]\s*",
+               "", t, flags=re.I)
+    # "Zoom Meeting" / "Teams meeting": the app name leads but has no separator
+    t = re.sub(r"^\s*(whatsapp|discord|zoom|meet|teams|telegram|messenger)\b\s*",
+               "", t, flags=re.I)
+    t = re.sub(r"\b(\d{1,2}:\d{2}(:\d{2})?|incoming call|ongoing call|voice call|"
+               r"video call|meeting|call|🔊)\b", "", t, flags=re.I)
+    t = re.sub(r"\s{2,}", " ", t).strip(" -|:|—")
+    return t[:48]
+
+
+def _tail_after(text, previous):
+    """New part of a scraped transcript since the last poll."""
+    text = str(text or "")
+    previous = str(previous or "")
+    if not previous:
+        return text
+    if text.startswith(previous):
+        return text[len(previous):]
+    idx = text.find(previous)
+    if idx >= 0:
+        return text[idx + len(previous):]
+    # transcript scrolled: fall back to the last few lines
+    return "\n".join([l for l in text.splitlines() if l.strip()][-3:])
+
+
+def _chat_poll_loop(app, interval=6.0):
+    """Watch a chat window and reply when new text shows up."""
+    import time as _t
+    last = ""
+    while engine().active and not _state.get("abort"):
+        _t.sleep(interval)
+        sess = engine().session
+        if not sess or sess.kind != "chat" or not sess.auto:
+            continue
+        # never fire select-all/copy into an unrelated app: it would clobber
+        # the clipboard and could disturb whatever the user is typing
+        try:
+            if app and appslib:
+                front = appslib.active_app()
+                if front and front != app:
+                    continue
+        except Exception:
+            pass
+        try:
+            res = appslib.read_chat(app=app) if appslib else {"text": ""}
+        except Exception as e:
+            print("[jarvis] chat poll error:", e)
+            continue
+        text = (res or {}).get("text") or ""
+        if not text or text == last:
+            continue
+        new = _tail_after(text, last).strip()
+        last = text
+        if len(new) < 2:
+            continue
+        try:
+            reply = engine().hear(new)
+        except Exception as e:
+            print("[jarvis] chat reply failed:", e)
+            continue
+        if reply:
+            print("[jarvis] chat reply: %r" % reply)
+
+
+def _start_chat_poll(app):
+    if _CHAT_POLL.get("thread") and _CHAT_POLL["thread"].is_alive():
+        return
+    t = threading.Thread(target=_chat_poll_loop, args=(app,), daemon=True)
+    _CHAT_POLL["thread"] = t
+    t.start()
+
+
+def session_state():
+    eng = _ENGINE
+    if eng is None or not eng.active:
+        return {"active": False, "transcript": []}
+    st = eng.status()
+    st["transcript"] = eng.session.transcript(40)
+    return st
 def fetch_free_models(cfg, force=False):
     """Free models offered by the current provider, best first.
 
@@ -2171,6 +2690,18 @@ class Handler(BaseHTTPRequestHandler):
             with _ACTION_LOG_LOCK:
                 self._send(200, {"actions": list(_ACTION_LOG[-25:])})
             return
+        if path == "/session":
+            self._send(200, session_state())
+            return
+        if path == "/calls":
+            calls = appslib.detect_calls(appslib.windows()) if appslib else []
+            self._send(200, {"calls": calls, "count": len(calls)})
+            return
+        if path == "/audio/devices":
+            info = audio_devices()
+            info["current"] = load_config().get("voice_device", "")
+            self._send(200, info)
+            return
         self._send(404, {"error": "not found"})
 
     # ---- POST -----------------------------------------------------------
@@ -2251,6 +2782,50 @@ class Handler(BaseHTTPRequestHandler):
             reply = chat_reply(session, text)
             print(f"[jarvis] chat({session}): {text!r} -> {reply!r}")
             self._send(200, {"reply": reply})
+            return
+
+        if path == "/session/start":
+            _state["abort"] = False
+            st, msg = start_session(
+                str(payload.get("kind") or "call").strip().lower(),
+                app=str(payload.get("app") or "").strip().lower(),
+                who=str(payload.get("who") or "").strip())
+            self._send(200, {"started": True, "session": st, "speak": msg})
+            return
+        if path == "/session/stop":
+            self._send(200, stop_session())
+            return
+        if path == "/session/say":
+            text = (payload.get("text") or "").strip()
+            if not text:
+                self._send(200, {"ok": False, "error": "nothing to say"})
+                return
+            if not (_ENGINE and _ENGINE.active):
+                self._send(200, {"ok": False, "error": "no active session"})
+                return
+            engine().say(text)
+            self._send(200, {"ok": True, "said": text})
+            return
+        if path == "/session/mute":
+            muted = bool(payload.get("muted", True))
+            if _ENGINE and _ENGINE.active:
+                _ENGINE.session.muted = muted
+            self._send(200, {"ok": True, "muted": muted})
+            return
+        if path == "/audio/use":
+            idx, resolved = find_output_device(payload.get("device") or "")
+            if idx is None:
+                self._send(200, {"ok": False, "error": "device not found"})
+                return
+            cfg = load_config()
+            cfg["voice_device"] = resolved
+            save_config(cfg)
+            self._send(200, {"ok": True, "device": resolved})
+            return
+        if path == "/chat/read":
+            res = appslib.read_chat(app=str(payload.get("app") or "")) if appslib \
+                else {"ok": False, "text": "", "error": "apps.py missing"}
+            self._send(200, res)
             return
 
         if path != "/command":

@@ -13,5 +13,8 @@
   "safe_mode": true,
   "failsafe": true,
   "speed": 1.0,
-  "max_actions": 6
+  "max_actions": 6,
+  "voice_device": "",
+  "auto_converse": true,
+  "chat_poll": 6.0
 }
