@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BIT FACE — binary robot portraits</title>
+<style>
+  :root{
+    --void:#05080f;
+    --dim:rgba(84,116,140,0.20);
+    --body:#2f8f88;
+    --bright:#6fffe0;
+    --eye:#ffc46b;
+    --line:rgba(111,255,224,0.18);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--void);
+    color:var(--bright);
+    font-family:ui-monospace,"SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;
+    overflow:hidden;
+  }
+  canvas{position:fixed;inset:0;display:block}
+
+  .frame{
+    position:fixed;inset:0;pointer-events:none;
+    padding:clamp(14px,3vw,32px);
+    display:flex;flex-direction:column;justify-content:space-between;
+  }
+  .row{display:flex;justify-content:space-between;align-items:flex-end;gap:16px}
+
+  .mark{
+    font-size:clamp(11px,1.4vw,13px);
+    letter-spacing:.34em;text-transform:uppercase;
+    color:var(--bright);opacity:.85;
+  }
+  .mark b{font-weight:700}
+  .mark span{color:var(--body)}
+
+  .name{
+    text-align:right;
+    font-size:clamp(22px,5vw,44px);
+    font-weight:700;letter-spacing:.06em;
+    line-height:1;
+    text-shadow:0 0 24px rgba(111,255,224,.35);
+  }
+  .name small{
+    display:block;margin-top:8px;
+    font-size:clamp(10px,1.3vw,12px);
+    font-weight:400;letter-spacing:.3em;
+    color:var(--body);
+  }
+
+  .read{
+    max-width:34ch;
+    font-size:clamp(10px,1.3vw,12px);
+    line-height:1.9;letter-spacing:.12em;
+    color:var(--body);text-transform:uppercase;
+  }
+  .keys{
+    display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end;
+    pointer-events:auto;
+  }
+  .keys button{
+    font:inherit;font-size:clamp(10px,1.3vw,12px);letter-spacing:.2em;
+    text-transform:uppercase;
+    color:var(--bright);background:transparent;
+    border:1px solid var(--line);border-radius:2px;
+    padding:9px 14px;cursor:pointer;
+    transition:background .2s ease,border-color .2s ease;
+  }
+  .keys button:hover,.keys button:focus-visible{
+    background:rgba(111,255,224,.08);border-color:var(--bright);
+  }
+  .keys button:focus-visible{outline:2px solid var(--eye);outline-offset:2px}
+
+  @media (max-width:620px){
+    .row{flex-direction:column;align-items:flex-start}
+    .name{text-align:left}
+    .keys{justify-content:flex-start}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .name{text-shadow:none}
+  }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Animated binary digits forming robot faces"></canvas>
+
+<div class="frame">
+  <div class="row">
+    <div class="mark"><b>BIT&nbsp;FACE</b> <span>// portraits drawn in 0 and 1</span></div>
+    <div class="name" id="faceName">SENTRY<small id="faceIdx">UNIT 01 / 04</small></div>
+  </div>
+
+  <div class="row">
+    <p class="read">Every column is a stream of bits. Odd columns fall, even columns rise. Where a face lives, the bits burn brighter.</p>
+    <div class="keys">
+      <button id="next" type="button">Next face</button>
+      <button id="toggle" type="button">Pause stream</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const nameEl = document.getElementById('faceName');
+  const idxEl = document.getElementById('faceIdx');
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const C = {
+    void: '#05080f',
+    dim: 'rgba(84,116,140,0.20)',
+    body: 'rgba(47,143,136,0.85)',
+    bright: '#6fffe0',
+    eye: '#ffc46b'
+  };
+
+  /* ---------- face geometry (normalised 0..1 box) ----------
+     l: 1 = head plate, 2 = feature, 0 = cut-out            */
+  const FACES = [
+    { name: 'SENTRY', tag: 'patrol optics', shapes: [
+      { t:'rect', x:.475, y:.00, w:.05, h:.14, l:1 },
+      { t:'circle', cx:.50, cy:.015, r:.045, l:2 },
+      { t:'rrect', x:.10, y:.13, w:.80, h:.74, r:.09, l:1 },
+      { t:'rrect', x:.23, y:.31, w:.19, h:.15, r:.03, l:2, eye:1 },
+      { t:'rrect', x:.58, y:.31, w:.19, h:.15, r:.03, l:2, eye:1 },
+      { t:'rect', x:.30, y:.63, w:.40, h:.045, l:2 },
+      { t:'rect', x:.34, y:.71, w:.32, h:.035, l:2 }
+    ]},
+    { name: 'VISOR', tag: 'wide spectrum', shapes: [
+      { t:'rrect', x:.08, y:.16, w:.84, h:.66, r:.22, l:1 },
+      { t:'rrect', x:.16, y:.30, w:.68, h:.20, r:.09, l:2 },
+      { t:'rect', x:.16, y:.385, w:.68, h:.035, l:0 },
+      { t:'rect', x:.40, y:.30, w:.03, h:.20, l:0 },
+      { t:'rect', x:.36, y:.64, w:.28, h:.05, l:2 },
+      { t:'rect', x:.02, y:.36, w:.07, h:.16, l:2 },
+      { t:'rect', x:.91, y:.36, w:.07, h:.16, l:2 }
+    ]},
+    { name: 'ORB', tag: 'friendly build', shapes: [
+      { t:'circle', cx:.50, cy:.50, r:.40, l:1 },
+      { t:'circle', cx:.345, cy:.42, r:.075, l:2, eye:1 },
+      { t:'circle', cx:.655, cy:.42, r:.075, l:2, eye:1 },
+      { t:'ring', cx:.50, cy:.50, r:.24, w:.045, a0:0.22, a1:0.78, l:2 },
+      { t:'circle', cx:.14, cy:.20, r:.05, l:2 },
+      { t:'circle', cx:.86, cy:.20, r:.05, l:2 }
+    ]},
+    { name: 'GUARD', tag: 'threat posture', shapes: [
+      { t:'rrect', x:.12, y:.12, w:.76, h:.72, r:.04, l:1 },
+      { t:'tri', ax:.22, ay:.32, bx:.45, by:.40, cx:.22, cy:.47, l:2, eye:1 },
+      { t:'tri', ax:.78, ay:.32, bx:.55, by:.40, cx:.78, cy:.47, l:2, eye:1 },
+      { t:'rect', x:.28, y:.62, w:.44, h:.10, l:2 },
+      { t:'rect', x:.36, y:.62, w:.025, h:.10, l:0 },
+      { t:'rect', x:.49, y:.62, w:.025, h:.10, l:0 },
+      { t:'rect', x:.62, y:.62, w:.025, h:.10, l:0 }
+    ]}
+  ];
+
+  /* ---------- hit tests ---------- */
+  function inRRect(px, py, s) {
+    const x0 = s.x, y0 = s.y, x1 = s.x + s.w, y1 = s.y + s.h, r = s.r || 0;
+    if (px < x0 || px > x1 || py < y0 || py > y1) return false;
+    if (!r) return true;
+    const cx = Math.min(Math.max(px, x0 + r), x1 - r);
+    const cy = Math.min(Math.max(py, y0 + r), y1 - r);
+    const dx = px - cx, dy = py - cy;
+    return dx * dx + dy * dy <= r * r;
+  }
+  function inTri(px, py, s) {
+    const d = (s.by - s.cy) * (s.ax - s.cx) + (s.cx - s.bx) * (s.ay - s.cy);
+    if (!d) return false;
+    const a = ((s.by - s.cy) * (px - s.cx) + (s.cx - s.bx) * (py - s.cy)) / d;
+    const b = ((s.cy - s.ay) * (px - s.cx) + (s.ax - s.cx) * (py - s.cy)) / d;
+    return a >= 0 && b >= 0 && a + b <= 1;
+  }
+  function level(px, py, face, blink) {
+    let out = 0;
+    for (const s of face.shapes) {
+      let hit = false;
+      if (s.t === 'rect' || s.t === 'rrect') {
+        let q = s;
+        if (s.eye && blink < 1) {
+          const h = s.h * blink, cy = s.y + s.h / 2;
+          q = { x: s.x, y: cy - h / 2, w: s.w, h: Math.max(h, .012), r: Math.min(s.r || 0, h / 2) };
+        }
+        hit = inRRect(px, py, q);
+      } else if (s.t === 'circle') {
+        const ry = s.eye ? Math.max(s.r * blink, .012) : s.r;
+        const dx = (px - s.cx) / s.r, dy = (py - s.cy) / ry;
+        hit = dx * dx + dy * dy <= 1;
+      } else if (s.t === 'ring') {
+        const dx = px - s.cx, dy = py - s.cy;
+        const d = Math.hypot(dx, dy);
+        if (Math.abs(d - s.r) <= s.w) {
+          const a = Math.atan2(dy, dx) / Math.PI;
+          hit = a >= s.a0 && a <= s.a1;
+        }
+      } else if (s.t === 'tri') {
+        hit = inTri(px, py, s);
+      }
+      if (hit) out = s.l;   // later shapes win, so cut-outs carve features
+    }
+    return out;
+  }
+
+  /* ---------- streams ---------- */
+  const CELL_W_BASE = 15, CELL_H_BASE = 19;
+  let cw, ch, cols, rows, gridW, gridH, offX, offY, cols_ = [];
+  let W = 0, H = 0;
+
+  function build() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const scale = W < 560 ? 0.8 : 1;
+    cw = CELL_W_BASE * scale; ch = CELL_H_BASE * scale;
+    cols = Math.ceil(W / cw) + 1;
+    rows = Math.ceil(H / ch) + 2;
+
+    cols_ = [];
+    for (let i = 0; i < cols; i++) {
+      const len = rows + 40;
+      const bits = new Uint8Array(len);
+      for (let j = 0; j < len; j++) bits[j] = Math.random() < .5 ? 0 : 1;
+      cols_.push({
+        bits, len,
+        dir: i % 2 === 0 ? 1 : -1,
+        speed: 2.2 + Math.random() * 5.4,
+        pos: Math.random() * len
+      });
+    }
+
+    const size = Math.min(W * 0.60, H * 0.78);
+    gridW = size; gridH = size;
+    offX = (W - size) / 2;
+    offY = (H - size) / 2 - H * 0.02;
+
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+  }
+
+  /* ---------- state ---------- */
+  let cur = 0, prev = 0, trans = 1, blink = 1;
+  let running = !reduce;
+  let last = performance.now(), sinceFace = 0, sinceBlink = 0, blinkT = -1;
+
+  function setFace(i) {
+    prev = cur; cur = (i + FACES.length) % FACES.length;
+    trans = 0; sinceFace = 0;
+    nameEl.firstChild.nodeValue = FACES[cur].name;
+    idxEl.textContent = 'UNIT 0' + (cur + 1) + ' / 0' + FACES.length + ' · ' + FACES[cur].tag.toUpperCase();
+  }
+
+  function draw(now) {
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+
+    if (running) {
+      for (const c of cols_) {
+        c.pos += c.dir * c.speed * dt * 6;
+        if (c.pos > c.len) c.pos -= c.len;
+        if (c.pos < 0) c.pos += c.len;
+      }
+      sinceFace += dt; sinceBlink += dt;
+      if (trans < 1) trans = Math.min(1, trans + dt / 0.7);
+      if (sinceFace > 7) setFace(cur + 1);
+
+      if (blinkT < 0 && sinceBlink > 3.4 + Math.random() * 3) { blinkT = 0; sinceBlink = 0; }
+      if (blinkT >= 0) {
+        blinkT += dt;
+        const p = blinkT / 0.22;
+        blink = p >= 1 ? (blinkT = -1, 1) : Math.abs(Math.cos(p * Math.PI));
+      }
+    }
+
+    ctx.fillStyle = C.void;
+    ctx.fillRect(0, 0, W, H);
+    ctx.font = '600 ' + Math.round(ch * 0.72) + 'px ui-monospace, Menlo, Consolas, monospace';
+
+    const wipe = trans;
+    const buckets = [[], [], []]; // dim / body / feature
+
+    for (let i = 0; i < cols; i++) {
+      const c = cols_[i];
+      const x = i * cw + cw / 2;
+      const frac = c.pos - Math.floor(c.pos);
+      const base = Math.floor(c.pos);
+      const shift = -c.dir * frac * ch;
+
+      for (let r = 0; r < rows; r++) {
+        const y = r * ch + ch / 2 + shift - ch;
+        if (y < -ch || y > H + ch) continue;
+
+        const nx = (x - offX) / gridW;
+        const ny = (y - offY) / gridH;
+
+        let lv = 0;
+        if (nx >= -0.02 && nx <= 1.02 && ny >= -0.02 && ny <= 1.02) {
+          const useNew = ny <= wipe * 1.15 - 0.08;
+          lv = level(nx, ny, FACES[useNew ? cur : prev], blink);
+        }
+
+        const bit = c.bits[(base + r * c.dir + c.len * 4) % c.len];
+        buckets[lv].push(x, y, bit);
+      }
+    }
+
+    const styles = [C.dim, C.body, C.bright];
+    for (let l = 0; l < 3; l++) {
+      const b = buckets[l];
+      if (!b.length) continue;
+      ctx.fillStyle = styles[l];
+      ctx.shadowBlur = l === 2 ? 12 : 0;
+      ctx.shadowColor = l === 2 ? 'rgba(111,255,224,0.55)' : 'transparent';
+      for (let k = 0; k < b.length; k += 3) ctx.fillText(b[k + 2] ? '1' : '0', b[k], b[k + 1]);
+    }
+    ctx.shadowBlur = 0;
+
+    // wipe scan line while a face resolves
+    if (wipe < 1) {
+      const y = offY + wipe * gridH * 1.15 - gridH * 0.08;
+      const g = ctx.createLinearGradient(0, y - 26, 0, y + 6);
+      g.addColorStop(0, 'rgba(255,196,107,0)');
+      g.addColorStop(1, 'rgba(255,196,107,0.35)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, y - 26, W, 32);
+    }
+
+    requestAnimationFrame(draw);
+  }
+
+  /* ---------- controls ---------- */
+  document.getElementById('next').addEventListener('click', () => setFace(cur + 1));
+  const toggleBtn = document.getElementById('toggle');
+  toggleBtn.addEventListener('click', () => {
+    running = !running;
+    toggleBtn.textContent = running ? 'Pause stream' : 'Resume stream';
+    last = performance.now();
+  });
+  canvas.addEventListener('pointerdown', () => setFace(cur + 1));
+  window.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight') setFace(cur + 1);
+    if (e.key === 'ArrowLeft') setFace(cur - 1);
+  });
+  window.addEventListener('resize', build);
+
+  build();
+  setFace(0);
+  trans = 1;
+  if (reduce) toggleBtn.textContent = 'Resume stream';
+  requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>

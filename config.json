@@ -1,0 +1,11 @@
+{
+  "api_key": "sk-hnynfzTKYKCOc77HbdigSWHBMwoWqEymZeo49USptzjSRroqh50msrMQ9WyXYYI6",
+  "base_url": "https://opencode.ai/zen/v1",
+  "model": "ling-3.0-flash-fin-free",
+  "listen": true,
+  "secretary": true,
+  "answer_pos": [
+    0,
+    0
+  ]
+}

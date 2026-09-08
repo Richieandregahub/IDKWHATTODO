@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Richie Jarvis</title>
+<style>
+  :root{
+    --void:#04070d;
+    --dim:rgba(84,116,140,0.18);
+    --body:#2f8f88;
+    --bright:#6fffe0;
+    --eye:#ffc46b;
+    --line:rgba(111,255,224,0.16);
+    --panel:rgba(6,17,20,0.72);
+    --bad:#e05555;
+    --good:#39e08c;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--void);
+    color:var(--bright);
+    font-family:ui-monospace,"SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;
+    overflow:hidden;
+  }
+  canvas#c{position:fixed;inset:0;display:block}
+  .vignette{position:fixed;inset:0;pointer-events:none;
+    background:radial-gradient(ellipse at 50% 38%,transparent 35%,rgba(4,7,13,.75) 100%)}
+  .scan{position:fixed;inset:0;pointer-events:none;opacity:.35;
+    background:repeating-linear-gradient(to bottom,rgba(111,255,224,.05) 0 1px,transparent 1px 3px)}
+
+  /* ---------- HUD ---------- */
+  .hud{position:fixed;inset:0;pointer-events:none;padding:clamp(12px,2.4vw,26px);
+    display:flex;flex-direction:column;justify-content:space-between;gap:12px}
+  .topbar{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+  .brand{font-size:clamp(11px,1.4vw,13px);letter-spacing:.34em;text-transform:uppercase}
+  .brand b{font-weight:700}
+  .brand span{color:var(--body)}
+  .brand em{display:block;margin-top:6px;font-style:normal;font-size:10px;letter-spacing:.28em;color:var(--body)}
+
+  .telemetry{text-align:right;font-size:10.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--body);line-height:2}
+  .telemetry .clock{font-size:clamp(20px,3.4vw,30px);letter-spacing:.08em;color:var(--bright);line-height:1;font-weight:600;
+    text-shadow:0 0 22px rgba(111,255,224,.35)}
+  #dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--bad);
+    margin-right:7px;vertical-align:middle;box-shadow:0 0 9px currentColor;transition:background .3s}
+  #dot.on{background:var(--good)}
+
+  /* ---------- transcript rail ---------- */
+  #log{position:fixed;left:clamp(12px,2.4vw,26px);top:24%;width:min(300px,28vw);
+    max-height:44vh;overflow:hidden;display:flex;flex-direction:column;gap:7px;pointer-events:none;
+    mask-image:linear-gradient(to bottom,#000 60%,transparent);-webkit-mask-image:linear-gradient(to bottom,#000 60%,transparent)}
+  .entry{border-left:2px solid var(--line);padding:7px 11px;background:rgba(47,143,136,.08);
+    font-size:12px;letter-spacing:.03em;line-height:1.55;color:#a9d8d0;
+    animation:slide .32s ease both}
+  .entry b{display:block;color:var(--body);font-weight:600;letter-spacing:.16em;
+    text-transform:uppercase;font-size:9.5px;margin-bottom:3px}
+  .entry.you{border-color:rgba(255,196,107,.5);background:rgba(255,196,107,.07)}
+  .entry.you b{color:var(--eye)}
+  @keyframes slide{from{opacity:0;transform:translateX(-10px)}}
+
+  /* ---------- console ---------- */
+  .console{pointer-events:auto;align-self:center;width:min(680px,94vw);
+    display:flex;flex-direction:column;gap:12px;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:16px 18px 14px;backdrop-filter:blur(9px);
+    box-shadow:0 0 60px rgba(4,7,13,.8),inset 0 1px 0 rgba(111,255,224,.08)}
+
+  .stream{min-height:44px;text-align:center;display:flex;flex-direction:column;gap:5px;justify-content:center}
+  #heard{font-size:15px;color:var(--eye);letter-spacing:.02em;min-height:20px}
+  #reply{font-size:13px;color:#a9d8d0;line-height:1.55;min-height:18px}
+  #reply::after{content:'▌';color:var(--bright);opacity:0;margin-left:2px}
+  #reply.typing::after{opacity:1;animation:cursor .7s steps(2) infinite}
+  @keyframes cursor{50%{opacity:0}}
+
+  .inputrow{display:flex;gap:9px;align-items:stretch}
+  #micbtn{position:relative;width:52px;flex:0 0 52px;border-radius:12px;cursor:pointer;
+    border:1px solid var(--line);background:rgba(47,143,136,.14);
+    display:flex;align-items:center;justify-content:center;gap:2px;transition:all .2s;overflow:hidden}
+  #micbtn:hover{border-color:var(--bright)}
+  #micbtn.listening{border-color:var(--eye);background:rgba(255,196,107,.14);box-shadow:0 0 24px rgba(255,196,107,.35)}
+  #micbtn .bar{width:3px;height:8px;border-radius:2px;background:var(--bright);transition:height .09s linear}
+  #micbtn.listening .bar{background:var(--eye)}
+
+  #chatin{flex:1;min-width:0;background:rgba(4,7,13,.55);border:1px solid var(--line);border-radius:12px;
+    padding:0 16px;color:var(--bright);font:inherit;font-size:13.5px;letter-spacing:.03em;outline:none;height:52px}
+  #chatin:focus{border-color:var(--bright);box-shadow:0 0 16px rgba(111,255,224,.2)}
+  #chatin::placeholder{color:var(--body);letter-spacing:.12em;font-size:11.5px}
+  #sendbtn{width:52px;flex:0 0 52px;border-radius:12px;border:1px solid var(--line);
+    background:rgba(47,143,136,.18);color:var(--bright);cursor:pointer;font-size:16px;transition:all .18s}
+  #sendbtn:hover{background:rgba(111,255,224,.18);border-color:var(--bright)}
+
+  .chips{display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
+  .chips::-webkit-scrollbar{display:none}
+  .chip{flex:0 0 auto;border:1px solid var(--line);background:rgba(47,143,136,.10);color:#9fd6cd;
+    padding:7px 12px;border-radius:20px;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;
+    cursor:pointer;transition:all .18s;white-space:nowrap}
+  .chip:hover{background:rgba(111,255,224,.16);border-color:var(--bright);color:var(--bright)}
+
+  .footnote{display:flex;justify-content:space-between;align-items:center;gap:10px;
+    font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--body)}
+  .footnote kbd{border:1px solid var(--line);border-radius:3px;padding:1px 5px;color:#9fd6cd}
+  .toolbtns{display:flex;gap:7px}
+  .toolbtns button{background:none;border:1px solid var(--line);color:var(--body);border-radius:20px;
+    padding:5px 10px;font:inherit;font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;cursor:pointer;transition:all .18s}
+  .toolbtns button:hover,.toolbtns button.on{color:var(--bright);border-color:var(--bright)}
+
+  button:focus-visible,#chatin:focus-visible,#micbtn:focus-visible,.chip:focus-visible{
+    outline:2px solid var(--eye);outline-offset:2px}
+
+  /* ---------- settings ---------- */
+  #gear{position:fixed;top:clamp(12px,2.4vw,26px);right:clamp(12px,2.4vw,26px);
+    background:none;border:1px solid var(--line);color:var(--body);width:32px;height:32px;
+    border-radius:50%;font-size:14px;cursor:pointer;z-index:20;transition:all .2s}
+  #gear:hover{color:var(--bright);border-color:var(--bright);transform:rotate(60deg)}
+
+  #modal{position:fixed;inset:0;background:rgba(2,6,12,.82);backdrop-filter:blur(4px);
+    display:flex;align-items:center;justify-content:center;z-index:50;padding:18px}
+  #modal[hidden]{display:none}
+  #modalcard{width:min(430px,100%);background:#061116;border:1px solid var(--line);
+    border-radius:14px;padding:24px;box-shadow:0 0 50px rgba(111,255,224,.14)}
+  #modalcard h2{font-size:11px;letter-spacing:.26em;font-weight:700;margin-bottom:8px;text-transform:uppercase}
+  #modalcard .hint{font-size:11px;color:var(--body);margin-bottom:16px;line-height:1.6}
+  #modalcard label{display:block;font-size:10px;letter-spacing:.18em;color:var(--body);margin-bottom:14px;text-transform:uppercase}
+  #modalcard input{width:100%;margin-top:6px;background:rgba(4,7,13,.6);border:1px solid var(--line);
+    border-radius:8px;padding:10px 12px;color:var(--bright);font:inherit;font-size:13px;outline:none;letter-spacing:.02em}
+  #modalcard input:focus{border-color:var(--bright);box-shadow:0 0 12px rgba(111,255,224,.2)}
+  .modalrow{display:flex;gap:10px;margin-top:6px}
+  .modalrow button{flex:1;padding:11px 0;border-radius:8px;border:none;cursor:pointer;
+    letter-spacing:.2em;font:inherit;font-size:11px;font-weight:700;background:var(--body);color:#03110d}
+  .modalrow button.ghost{background:none;border:1px solid var(--line);color:var(--bright)}
+  .modalrow button:hover{box-shadow:0 0 16px rgba(111,255,224,.3)}
+
+  @media (max-width:820px){
+    #log{display:none}
+    .telemetry .clock{font-size:20px}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .scan{display:none}
+    .entry{animation:none}
+  }
+
+  /* ---------- AI chat box ---------- */
+  #chatfab{position:fixed;right:clamp(12px,2.4vw,26px);bottom:24px;z-index:31;
+    width:54px;height:54px;border-radius:50%;border:1px solid var(--line);
+    background:var(--panel);color:var(--bright);cursor:pointer;font:inherit;
+    font-size:10px;letter-spacing:.12em;font-weight:700;
+    box-shadow:0 0 24px rgba(111,255,224,.18);display:flex;align-items:center;justify-content:center;
+    transition:all .2s}
+  #chatfab:hover{border-color:var(--bright);box-shadow:0 0 30px rgba(111,255,224,.35)}
+
+  #chatbox{position:fixed;right:clamp(12px,2.4vw,26px);top:120px;bottom:300px;
+    width:min(340px,32vw);z-index:32;display:flex;flex-direction:column;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    backdrop-filter:blur(9px);
+    box-shadow:0 0 60px rgba(4,7,13,.8),inset 0 1px 0 rgba(111,255,224,.08);
+    overflow:hidden;transform:translateY(140%);opacity:0;visibility:hidden;pointer-events:none;
+    transition:transform .28s ease,opacity .28s ease,visibility .28s}
+  #chatbox.open{transform:none;opacity:1;visibility:visible;pointer-events:auto}
+
+  .chat-head{display:flex;justify-content:space-between;align-items:center;
+    padding:11px 14px;border-bottom:1px solid var(--line);flex:0 0 auto;
+    font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--body)}
+  .chat-head b{color:var(--bright);font-weight:700;letter-spacing:.16em}
+  .chat-head .x{cursor:pointer;color:var(--body);border:1px solid var(--line);
+    border-radius:6px;padding:2px 9px;font-size:11px;background:none;font-family:inherit;transition:all .18s}
+  .chat-head .x:hover{color:var(--bright);border-color:var(--bright)}
+
+  #chatlog{flex:1 1 auto;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:9px;
+    scrollbar-width:thin;scrollbar-color:var(--body) transparent}
+  #chatlog::-webkit-scrollbar{width:6px}
+  #chatlog::-webkit-scrollbar-thumb{background:var(--body);border-radius:3px}
+  .msg{display:flex;flex-direction:column;gap:3px;max-width:92%}
+  .msg .who{font-size:8px;letter-spacing:.18em;text-transform:uppercase}
+  .msg .bubble{line-height:1.5;padding:8px 11px;border-radius:11px;white-space:pre-wrap;word-break:break-word;font-size:12px}
+  .msg.you{align-self:flex-end;text-align:right}
+  .msg.you .who{color:var(--eye)}
+  .msg.you .bubble{background:rgba(255,196,107,.12);border:1px solid rgba(255,196,107,.4);color:#ffe6c2}
+  .msg.ai{align-self:flex-start}
+  .msg.ai .who{color:var(--body)}
+  .msg.ai .bubble{background:rgba(47,143,136,.12);border:1px solid var(--line);color:#a9d8d0}
+  .msg.ai .bubble.typing::after{content:'▌';opacity:1;margin-left:2px;animation:cursor .7s steps(2) infinite}
+
+  .chat-input{display:flex;gap:8px;padding:10px;border-top:1px solid var(--line);flex:0 0 auto}
+  #chatin2{flex:1;min-width:0;background:rgba(4,7,13,.55);border:1px solid var(--line);border-radius:10px;
+    padding:0 12px;color:var(--bright);font:inherit;font-size:12.5px;letter-spacing:.03em;outline:none;height:40px}
+  #chatin2:focus{border-color:var(--bright);box-shadow:0 0 14px rgba(111,255,224,.18)}
+  #chatin2::placeholder{color:var(--body);letter-spacing:.08em;font-size:11px}
+  #chatsend{width:46px;flex:0 0 46px;border-radius:10px;border:1px solid var(--line);
+    background:rgba(47,143,136,.18);color:var(--bright);cursor:pointer;font-size:15px;transition:all .18s}
+  #chatsend:hover{background:rgba(111,255,224,.18);border-color:var(--bright)}
+
+  @media (max-width:820px){
+    #chatbox{top:0;bottom:0;right:0;left:0;width:auto;border-radius:0;border:none;border-left:1px solid var(--line)}
+  }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Binary robot face avatar"></canvas>
+<div class="vignette"></div>
+<div class="scan"></div>
+
+<div class="hud">
+  <div class="topbar">
+    <div class="brand">
+      <b>RICHIE JARVIS</b> <span>// ai butler</span>
+      <em id="faceTag">local core · unit 01</em>
+    </div>
+    <div class="telemetry">
+      <div class="clock" id="clock">--:--</div>
+      <div id="datestamp">—</div>
+      <div><span id="dot"></span><span id="statustext">connecting to local core…</span></div>
+    </div>
+  </div>
+
+  <div class="console">
+    <div class="stream">
+      <div id="heard">…</div>
+      <div id="reply"></div>
+    </div>
+
+    <div class="inputrow">
+      <div id="micbtn" role="button" tabindex="0" title="Click or press Space to talk">
+        <i class="bar"></i><i class="bar"></i><i class="bar"></i><i class="bar"></i><i class="bar"></i>
+      </div>
+      <input id="chatin" type="text" autocomplete="off" placeholder="Type a command, or say “Richie Jarvis, open notepad”">
+      <button id="sendbtn" title="Send">&#10148;</button>
+    </div>
+
+    <div class="chips">
+      <div class="chip">open notepad</div>
+      <div class="chip">open chrome</div>
+      <div class="chip">search youtube lofi beats</div>
+      <div class="chip">what time is it</div>
+      <div class="chip">system status</div>
+      <div class="chip">screenshot</div>
+      <div class="chip">volume up</div>
+      <div class="chip">play music</div>
+      <div class="chip">send chat hello there</div>
+      <div class="chip">open url google.com</div>
+      <div class="chip">run command echo richie</div>
+      <div class="chip">help</div>
+    </div>
+
+    <div class="footnote">
+      <span><kbd>Space</kbd> talk &nbsp; <kbd>/</kbd> type &nbsp; <kbd>Esc</kbd> stop</span>
+      <span class="toolbtns">
+        <button id="langbtn" title="Speech language">EN</button>
+        <button id="wakebtn" class="on" title="Always listen for the wake word">WAKE</button>
+        <button id="sfxbtn" class="on" title="Interface sounds">SFX</button>
+      </span>
+    </div>
+  </div>
+</div>
+
+<button id="gear" title="AI brain settings">&#9881;</button>
+
+<button id="chatfab" title="Open AI chat">AI</button>
+
+<div id="chatbox" aria-label="AI chat box">
+  <div class="chat-head">
+    <b>AI CHAT</b>
+    <button class="x" id="chatclose" title="Close">ESC</button>
+  </div>
+  <div id="chatlog"></div>
+  <div class="chat-input">
+    <input id="chatin2" type="text" autocomplete="off" placeholder="Chat with Richie Jarvis…">
+    <button id="chatsend" title="Send">&#10148;</button>
+  </div>
+</div>
+
+<div id="modal" hidden>
+  <div id="modalcard">
+    <h2>AI brain — OpenCode Zen</h2>
+    <p class="hint">Get a key at opencode.ai/auth, then paste it here. It is stored only on your own PC by the local core.</p>
+    <label>API key<input id="inKey" type="password" placeholder="paste your Zen API key" autocomplete="off"></label>
+    <label>Model<input id="inModel" type="text" value="x-preview-f-free"></label>
+    <p class="hint" id="keyState">no key configured</p>
+    <div class="modalrow">
+      <button id="saveCfg">SAVE</button>
+      <button id="closeCfg" class="ghost">CLOSE</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   1. BIT FACE — the avatar. Binary streams that resolve into a
+   robot face which blinks, tracks the cursor and talks.
+   ============================================================ */
+const FACE = (() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const COL = {
+    void:'#04070d',
+    dim:'rgba(84,116,140,0.18)',
+    body:'rgba(47,143,136,0.80)',
+    bright:'#6fffe0',
+    warm:'#ffc46b'
+  };
+
+  /* mouth amplitude, 7 bars */
+  const MOUTH = new Float32Array(7).fill(0.12);
+
+  const FACES = [
+    { name:'SENTRY', tag:'unit 01 · patrol optics', shapes:[
+      { t:'rect', x:.475, y:.00, w:.05, h:.13, l:1 },
+      { t:'circle', cx:.50, cy:.015, r:.042, l:2 },
+      { t:'rrect', x:.10, y:.12, w:.80, h:.74, r:.10, l:1 },
+      { t:'rrect', x:.23, y:.30, w:.19, h:.15, r:.03, l:2, eye:1 },
+      { t:'rrect', x:.58, y:.30, w:.19, h:.15, r:.03, l:2, eye:1 },
+      { t:'eq',   x:.28, y:.66, w:.44, h:.20, l:2 }
+    ]},
+    { name:'VISOR', tag:'unit 02 · wide spectrum', shapes:[
+      { t:'rrect', x:.08, y:.15, w:.84, h:.66, r:.22, l:1 },
+      { t:'rrect', x:.16, y:.29, w:.68, h:.20, r:.09, l:2, eye:1 },
+      { t:'rect',  x:.16, y:.375, w:.68, h:.035, l:0 },
+      { t:'rect',  x:.40, y:.29, w:.03, h:.20, l:0 },
+      { t:'eq',    x:.33, y:.64, w:.34, h:.16, l:2 },
+      { t:'rect',  x:.02, y:.35, w:.07, h:.16, l:2 },
+      { t:'rect',  x:.91, y:.35, w:.07, h:.16, l:2 }
+    ]},
+    { name:'ORB', tag:'unit 03 · friendly build', shapes:[
+      { t:'circle', cx:.50, cy:.50, r:.40, l:1 },
+      { t:'circle', cx:.345, cy:.42, r:.075, l:2, eye:1 },
+      { t:'circle', cx:.655, cy:.42, r:.075, l:2, eye:1 },
+      { t:'ring', cx:.50, cy:.50, r:.24, w:.045, a0:.22, a1:.78, l:2, smile:1 },
+      { t:'circle', cx:.14, cy:.20, r:.05, l:2 },
+      { t:'circle', cx:.86, cy:.20, r:.05, l:2 }
+    ]},
+    { name:'GUARD', tag:'unit 04 · threat posture', shapes:[
+      { t:'rrect', x:.12, y:.11, w:.76, h:.73, r:.04, l:1 },
+      { t:'tri', ax:.22, ay:.31, bx:.45, by:.39, cx:.22, cy:.46, l:2, eye:1 },
+      { t:'tri', ax:.78, ay:.31, bx:.55, by:.39, cx:.78, cy:.46, l:2, eye:1 },
+      { t:'eq', x:.27, y:.65, w:.46, h:.18, l:2 }
+    ]}
+  ];
+
+  /* ---- hit tests ---- */
+  function inRRect(px,py,s){
+    const x1=s.x+s.w, y1=s.y+s.h, r=s.r||0;
+    if(px<s.x||px>x1||py<s.y||py>y1) return false;
+    if(!r) return true;
+    const cx=Math.min(Math.max(px,s.x+r),x1-r), cy=Math.min(Math.max(py,s.y+r),y1-r);
+    const dx=px-cx, dy=py-cy;
+    return dx*dx+dy*dy<=r*r;
+  }
+  function inTri(px,py,s){
+    const d=(s.by-s.cy)*(s.ax-s.cx)+(s.cx-s.bx)*(s.ay-s.cy);
+    if(!d) return false;
+    const a=((s.by-s.cy)*(px-s.cx)+(s.cx-s.bx)*(py-s.cy))/d;
+    const b=((s.cy-s.ay)*(px-s.cx)+(s.ax-s.cx)*(py-s.cy))/d;
+    return a>=0&&b>=0&&a+b<=1;
+  }
+  function level(px,py,face,blink,gaze){
+    let out=0;
+    for(const s of face.shapes){
+      let hit=false;
+      const gx = s.eye ? gaze.x*0.035 : 0, gy = s.eye ? gaze.y*0.025 : 0;
+      if(s.t==='rect'||s.t==='rrect'){
+        let q={x:s.x+gx,y:s.y+gy,w:s.w,h:s.h,r:s.r||0};
+        if(s.eye&&blink<1){
+          const h=s.h*blink, mid=q.y+s.h/2;
+          q={x:q.x,y:mid-h/2,w:q.w,h:Math.max(h,.012),r:Math.min(q.r,h/2)};
+        }
+        hit=inRRect(px,py,q);
+      } else if(s.t==='circle'){
+        const ry=s.eye?Math.max(s.r*blink,.012):s.r;
+        const dx=(px-(s.cx+gx))/s.r, dy=(py-(s.cy+gy))/ry;
+        hit=dx*dx+dy*dy<=1;
+      } else if(s.t==='ring'){
+        const dx=px-s.cx, dy=py-s.cy, d=Math.hypot(dx,dy);
+        if(Math.abs(d-s.r)<=s.w){
+          const a=Math.atan2(dy,dx)/Math.PI;
+          hit=a>=s.a0&&a<=s.a1;
+        }
+      } else if(s.t==='tri'){
+        hit=inTri(px,py,{...s,ay:s.ay+gy,by:s.by+gy,cy:s.cy+gy,ax:s.ax+gx,bx:s.bx+gx,cx:s.cx+gx});
+      } else if(s.t==='eq'){
+        if(px>=s.x&&px<=s.x+s.w){
+          const i=Math.min(MOUTH.length-1,Math.floor((px-s.x)/(s.w/MOUTH.length)));
+          const gap=s.w/MOUTH.length*0.22;
+          const bx=s.x+i*(s.w/MOUTH.length);
+          if(px>=bx+gap*0.5&&px<=bx+s.w/MOUTH.length-gap*0.5){
+            const h=s.h*Math.max(MOUTH[i],.10), mid=s.y+s.h/2;
+            hit=py>=mid-h/2&&py<=mid+h/2;
+          }
+        }
+      }
+      if(hit) out=s.l;
+    }
+    return out;
+  }
+
+  /* ---- grid ---- */
+  const CW=15, CH=19;
+  let cw,ch,cols,rows,gridW,gridH,offX,offY,streams=[],W=0,H=0;
+
+  function build(){
+    const dpr=Math.min(devicePixelRatio||1,2);
+    W=innerWidth; H=innerHeight;
+    canvas.width=W*dpr; canvas.height=H*dpr;
+    canvas.style.width=W+'px'; canvas.style.height=H+'px';
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+
+    const scale = W<560?0.78:1;
+    cw=CW*scale; ch=CH*scale;
+    cols=Math.ceil(W/cw)+1; rows=Math.ceil(H/ch)+2;
+
+    streams=[];
+    for(let i=0;i<cols;i++){
+      const len=rows+40, bits=new Uint8Array(len);
+      for(let j=0;j<len;j++) bits[j]=Math.random()<.5?0:1;
+      streams.push({bits,len,dir:i%2===0?1:-1,speed:2.0+Math.random()*5.2,pos:Math.random()*len});
+    }
+    const size=Math.min(W*0.52,H*0.62);
+    gridW=gridH=size;
+    offX=(W-size)/2;
+    offY=H*0.36-size/2;
+    ctx.textBaseline='middle'; ctx.textAlign='center';
+  }
+
+  /* ---- state ---- */
+  let cur=0, prev=0, trans=1, blink=1, mode='idle', energy=0, targetEnergy=0;
+  let running=true, last=performance.now(), sinceFace=0, sinceBlink=0, blinkT=-1;
+  const gaze={x:0,y:0}, gazeT={x:0,y:0};
+  const listeners=[];
+
+  function setFace(i){
+    prev=cur; cur=(i+FACES.length)%FACES.length; trans=0; sinceFace=0;
+    listeners.forEach(f=>f(FACES[cur]));
+  }
+
+  addEventListener('pointermove',e=>{
+    gazeT.x=(e.clientX/W-0.5)*2;
+    gazeT.y=((e.clientY-offY-gridH/2)/H)*2;
+  });
+
+  function draw(now){
+    const dt=Math.min((now-last)/1000,.05); last=now;
+
+    energy += (targetEnergy-energy)*Math.min(1,dt*6);
+    gaze.x += (gazeT.x-gaze.x)*Math.min(1,dt*4);
+    gaze.y += (gazeT.y-gaze.y)*Math.min(1,dt*4);
+
+    /* mouth envelope */
+    const drive = mode==='speaking' ? 1 : mode==='listening' ? 0.45 : 0.10;
+    for(let i=0;i<MOUTH.length;i++){
+      const target = mode==='speaking'
+        ? 0.25+Math.abs(Math.sin(now/(150+i*37)+i))*0.75*(0.5+energy)
+        : mode==='listening'
+          ? 0.14+energy*0.5*(0.6+0.4*Math.sin(now/220+i))
+          : 0.12;
+      MOUTH[i]+=(Math.min(1,target*drive+ (mode==='idle'?0.12:0))-MOUTH[i])*Math.min(1,dt*14);
+    }
+
+    if(running){
+      const boost = 1 + energy*1.6 + (mode==='speaking'?0.7:0);
+      for(const c of streams){
+        c.pos += c.dir*c.speed*dt*6*boost;
+        if(c.pos>c.len) c.pos-=c.len;
+        if(c.pos<0) c.pos+=c.len;
+      }
+      sinceFace+=dt; sinceBlink+=dt;
+      if(trans<1) trans=Math.min(1,trans+dt/0.7);
+      if(mode==='idle'&&sinceFace>11) setFace(cur+1);
+      if(blinkT<0&&sinceBlink>3.2+Math.random()*3.5){blinkT=0;sinceBlink=0;}
+      if(blinkT>=0){
+        blinkT+=dt;
+        const p=blinkT/0.2;
+        blink = p>=1 ? (blinkT=-1,1) : Math.abs(Math.cos(p*Math.PI));
+      }
+    }
+
+    ctx.fillStyle=COL.void; ctx.fillRect(0,0,W,H);
+    ctx.font='600 '+Math.round(ch*0.72)+'px ui-monospace, Menlo, Consolas, monospace';
+
+    const wipe=trans, buckets=[[],[],[]];
+    for(let i=0;i<cols;i++){
+      const c=streams[i], x=i*cw+cw/2;
+      const frac=c.pos-Math.floor(c.pos), base=Math.floor(c.pos);
+      const shift=-c.dir*frac*ch;
+      for(let r=0;r<rows;r++){
+        const y=r*ch+ch/2+shift-ch;
+        if(y<-ch||y>H+ch) continue;
+        const nx=(x-offX)/gridW, ny=(y-offY)/gridH;
+        let lv=0;
+        if(nx>=-.03&&nx<=1.03&&ny>=-.03&&ny<=1.03){
+          const useNew = ny <= wipe*1.15-0.08;
+          lv=level(nx,ny,FACES[useNew?cur:prev],blink,gaze);
+        }
+        buckets[lv].push(x,y,c.bits[(base+r*c.dir+c.len*4)%c.len]);
+      }
+    }
+
+    const accent = mode==='listening' ? COL.warm : COL.bright;
+    const styles=[COL.dim,COL.body,accent];
+    for(let l=0;l<3;l++){
+      const b=buckets[l]; if(!b.length) continue;
+      ctx.fillStyle=styles[l];
+      ctx.shadowBlur = l===2 ? 10+energy*16 : 0;
+      ctx.shadowColor = l===2 ? (mode==='listening'?'rgba(255,196,107,.6)':'rgba(111,255,224,.55)') : 'transparent';
+      for(let k=0;k<b.length;k+=3) ctx.fillText(b[k+2]?'1':'0',b[k],b[k+1]);
+    }
+    ctx.shadowBlur=0;
+
+    if(wipe<1){
+      const y=offY+wipe*gridH*1.15-gridH*0.08;
+      const g=ctx.createLinearGradient(0,y-26,0,y+6);
+      g.addColorStop(0,'rgba(255,196,107,0)');
+      g.addColorStop(1,'rgba(255,196,107,0.32)');
+      ctx.fillStyle=g; ctx.fillRect(0,y-26,W,32);
+    }
+
+    /* thinking sweep */
+    if(mode==='thinking'){
+      const p=(now/1100)%1;
+      const y=offY+p*gridH;
+      const g=ctx.createLinearGradient(0,y-18,0,y+18);
+      g.addColorStop(0,'rgba(111,255,224,0)');
+      g.addColorStop(.5,'rgba(111,255,224,.20)');
+      g.addColorStop(1,'rgba(111,255,224,0)');
+      ctx.fillStyle=g; ctx.fillRect(offX-40,y-18,gridW+80,36);
+    }
+
+    requestAnimationFrame(draw);
+  }
+
+  addEventListener('resize',build);
+  build(); setFace(0); trans=1;
+  if(reduce) running=false;
+  requestAnimationFrame(draw);
+
+  return {
+    setMode(m){ mode=m; if(m==='listening') setFaceIfDifferent(2); if(m==='thinking') setFaceIfDifferent(1); },
+    setEnergy(v){ targetEnergy=Math.max(0,Math.min(1,v)); },
+    next(){ setFace(cur+1); },
+    prev(){ setFace(cur-1); },
+    onFace(f){ listeners.push(f); f(FACES[cur]); },
+    toggle(){ running=!running; last=performance.now(); return running; },
+    get running(){ return running; }
+  };
+  function setFaceIfDifferent(i){ if(cur!==i) setFace(i); }
+})();
+
+/* ============================================================
+   2. Small helpers — sound, clock, log
+   ============================================================ */
+const $ = id => document.getElementById(id);
+let sfxOn = true;
+let actx = null;
+function blip(freq=660, dur=0.09, type='sine', gain=0.05){
+  if(!sfxOn) return;
+  try{
+    actx = actx || new (window.AudioContext||window.webkitAudioContext)();
+    const o=actx.createOscillator(), g=actx.createGain();
+    o.type=type; o.frequency.value=freq;
+    g.gain.setValueAtTime(gain,actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001,actx.currentTime+dur);
+    o.connect(g).connect(actx.destination);
+    o.start(); o.stop(actx.currentTime+dur);
+  }catch(e){}
+}
+
+function log(kind, who, text){
+  const d=document.createElement('div');
+  d.className='entry '+kind;
+  const b=document.createElement('b'); b.textContent=who;
+  d.appendChild(b); d.appendChild(document.createTextNode(text));
+  $('log').prepend(d);
+  while($('log').children.length>14) $('log').lastChild.remove();
+}
+
+setInterval(()=>{
+  const n=new Date();
+  $('clock').textContent=n.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  $('datestamp').textContent=n.toLocaleDateString([], {weekday:'short',day:'2-digit',month:'short'});
+},1000);
+$('clock').textContent=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+
+FACE.onFace(f => { $('faceTag').textContent = 'local core · ' + f.tag; });
+
+/* typing effect for replies */
+let typeTimer=null;
+function typeOut(el, text){
+  clearInterval(typeTimer);
+  el.textContent=''; el.classList.add('typing');
+  let i=0;
+  typeTimer=setInterval(()=>{
+    el.textContent=text.slice(0,++i);
+    if(i>=text.length){ clearInterval(typeTimer); el.classList.remove('typing'); }
+  }, 16);
+}
+
+/* ============================================================
+   3. Backend: /health, /config, /command  (unchanged contract)
+   ============================================================ */
+async function healthCheck(){
+  try{
+    const r=await fetch('/health');
+    const data=await r.json();
+    $('dot').classList.toggle('on', r.ok);
+    $('statustext').textContent = r.ok
+      ? (data.brain ? 'core + brain online · '+(data.model||'') : 'core online · no ai brain')
+      : 'local core error';
+  }catch(e){
+    $('dot').classList.remove('on');
+    $('statustext').textContent='local core offline';
+  }
+}
+healthCheck(); setInterval(healthCheck, 5000);
+
+async function openSettings(){
+  try{
+    const c=await (await fetch('/config')).json();
+    $('inModel').value=c.model||'x-preview-f-free';
+    $('keyState').textContent=c.has_key?('key saved: '+c.key_masked):'no key configured yet';
+  }catch(e){ $('keyState').textContent='local core offline — start_jarvis.bat first'; }
+  $('modal').hidden=false; $('inKey').focus();
+}
+$('gear').addEventListener('click',openSettings);
+$('closeCfg').addEventListener('click',()=>{ $('modal').hidden=true; });
+$('saveCfg').addEventListener('click',async()=>{
+  const body={model:$('inModel').value.trim()};
+  const k=$('inKey').value.trim();
+  if(k) body.api_key=k;
+  try{
+    const d=await (await fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+    $('inKey').value='';
+    if(d.saved){
+      $('keyState').textContent=d.has_key?'brain connected. say something to Richie Jarvis.':'still no key set';
+      healthCheck(); blip(880,.1);
+      setTimeout(()=>{ $('modal').hidden=true; },700);
+    }
+  }catch(e){ $('keyState').textContent='save failed — is the local core running?'; }
+});
+$('inKey').addEventListener('keydown',e=>{ if(e.key==='Enter') $('saveCfg').click(); });
+
+let busy=false;
+async function sendCommand(text){
+  if(busy||!text) return;
+  busy=true;
+  $('heard').textContent='“'+text+'”';
+  log('you','you',text);
+  blip(520,.07,'square',.04);
+  FACE.setMode('thinking'); FACE.setEnergy(.35);
+  typeOut($('reply'),'…');
+
+  try{
+    const r=await fetch('/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+    const data=await r.json();
+    const msg=data.speak||'Done.';
+    typeOut($('reply'),msg);
+    log('jarvis','richie jarvis',msg);
+    blip(760,.09);
+    await speak(msg);
+  }catch(e){
+    const msg='Local core unreachable. Run start_jarvis.bat first.';
+    typeOut($('reply'),msg);
+    log('jarvis','system',msg);
+    blip(200,.18,'sawtooth',.05);
+    await speak('I cannot reach my local core.');
+  }
+  FACE.setMode(listening?'listening':'idle');
+  FACE.setEnergy(listening?.25:0);
+  busy=false;
+}
+
+/* ============================================================
+   4. Voice: speech synthesis + recognition + mic meter
+   ============================================================ */
+let lang='en-US';
+function stopSpeaking(){
+  try{ speechSynthesis.cancel(); }catch(e){}
+  busy = false;
+  FACE.setMode(listening?'listening':'idle');
+  FACE.setEnergy(0);
+}
+function pickVoice(){
+  const vs=speechSynthesis.getVoices();
+  const want=lang.slice(0,2);
+  return vs.find(v=>v.lang.startsWith(want)&&/male|daniel|david|guy|george|arif/i.test(v.name))
+      || vs.find(v=>v.lang.startsWith(want)) || null;
+}
+function speak(text){
+  return new Promise(res=>{
+    let done=false;
+    const finish=()=>{ if(done) return; done=true; FACE.setEnergy(0); res(); };
+    try{
+      speechSynthesis.cancel();
+      const u=new SpeechSynthesisUtterance(text);
+      u.voice=pickVoice(); u.lang=lang; u.rate=1.05; u.pitch=.92;
+      u.onstart=()=>{ FACE.setMode('speaking'); FACE.setEnergy(.8); };
+      u.onend=finish; u.onerror=finish;
+      speechSynthesis.speak(u);
+      setTimeout(finish, Math.min(20000, 2500+text.length*65));
+    }catch(e){ finish(); }
+  });
+}
+speechSynthesis.getVoices();
+speechSynthesis.onvoiceschanged=()=>speechSynthesis.getVoices();
+
+/* mic level meter -> bars + face energy */
+const bars=[...document.querySelectorAll('#micbtn .bar')];
+let analyser=null, levelData=null;
+async function startMeter(){
+  if(analyser) return;
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    const ac=new (window.AudioContext||window.webkitAudioContext)();
+    const src=ac.createMediaStreamSource(stream);
+    analyser=ac.createAnalyser(); analyser.fftSize=256;
+    levelData=new Uint8Array(analyser.frequencyBinCount);
+    src.connect(analyser);
+    meterLoop();
+  }catch(e){}
+}
+function meterLoop(){
+  requestAnimationFrame(meterLoop);
+  if(!analyser) return;
+  analyser.getByteFrequencyData(levelData);
+  let sum=0;
+  for(let i=0;i<levelData.length;i++) sum+=levelData[i];
+  const lvl=Math.min(1,(sum/levelData.length)/70);
+  bars.forEach((b,i)=>{
+    const k=lvl*(0.5+Math.abs(Math.sin(performance.now()/(160+i*45))));
+    b.style.height=(6+k*22).toFixed(1)+'px';
+  });
+  if(listening) FACE.setEnergy(lvl);
+}
+
+let recognition=null, recognizing=false, listening=false, wakeAlways=true, armed=false;
+function buildRecognition(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){
+    $('heard').textContent='Voice needs Chrome or Edge — typing still works.';
+    return null;
+  }
+  const rec=new SR();
+  rec.continuous=true; rec.interimResults=true; rec.lang=lang;
+  rec.onstart=()=>{ recognizing=true; };
+  rec.onerror=()=>{};
+  rec.onend=()=>{
+    recognizing=false;
+    if(wakeAlways||armed) setTimeout(()=>{ try{rec.start();}catch(e){} },350);
+    else setListening(false);
+  };
+  rec.onresult=ev=>{
+    let interim='', final='';
+    for(let i=ev.resultIndex;i<ev.results.length;i++){
+      const t=ev.results[i][0].transcript.trim();
+      if(ev.results[i].isFinal) final+=' '+t; else interim+=' '+t;
+    }
+    if(interim.trim()) $('heard').textContent=interim.trim()+' …';
+    if(!final.trim()) return;
+    const txt=final.trim().replace(/^[\s,.!?]+/,'');
+    $('heard').textContent=txt;
+    const wake=/(?:^|\s)(?:hey\s+|oke\s+|ok\s+)?(?:richie\s+jarvis|richie|jarvis|jervis|jarpis)\b[,:\s]*(.*)$/i.exec(txt);
+    if(wake&&wake[1].trim()){ stopSpeaking(); blip(980,.06); sendCommand(wake[1].trim()); }
+    else if(armed){ armed=false; stopSpeaking(); sendCommand(txt.replace(/\.$/,'')); }
+    else log('you','heard',txt);
+  };
+  return rec;
+}
+function setListening(on){
+  listening=on;
+  $('micbtn').classList.toggle('listening',on);
+  FACE.setMode(on?'listening':'idle');
+  if(!on) FACE.setEnergy(0);
+}
+function armMic(){
+  stopSpeaking();
+  armed=true; setListening(true); startMeter(); blip(880,.06);
+  $('heard').textContent='Listening… say your command.';
+  if(!recognition) recognition=buildRecognition();
+  if(recognition&&!recognizing){ try{recognition.start();}catch(e){} }
+}
+recognition=buildRecognition();
+if(recognition){ try{recognition.start();}catch(e){} startMeter(); }
+
+/* ============================================================
+   5. Controls
+   ============================================================ */
+$('micbtn').addEventListener('click',armMic);
+$('micbtn').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){e.preventDefault();armMic();} });
+
+function submitChat(){
+  const v=$('chatin').value.trim();
+  if(!v) return;
+  $('chatin').value='';
+  sendCommand(v);
+}
+$('sendbtn').addEventListener('click',submitChat);
+$('chatin').addEventListener('keydown',e=>{ if(e.key==='Enter') submitChat(); });
+document.querySelectorAll('.chip').forEach(c=>c.addEventListener('click',()=>sendCommand(c.textContent.trim())));
+
+$('langbtn').addEventListener('click',e=>{
+  lang = lang==='en-US' ? 'id-ID' : 'en-US';
+  e.target.textContent = lang==='en-US' ? 'EN' : 'ID';
+  if(recognition){ try{recognition.stop();}catch(_){} recognition.lang=lang; }
+});
+$('wakebtn').addEventListener('click',e=>{
+  wakeAlways=!wakeAlways;
+  e.target.classList.toggle('on',wakeAlways);
+  if(wakeAlways&&recognition&&!recognizing){ try{recognition.start();}catch(_){} }
+  if(!wakeAlways&&recognition){ try{recognition.stop();}catch(_){} }
+});
+$('sfxbtn').addEventListener('click',e=>{
+  sfxOn=!sfxOn; e.target.classList.toggle('on',sfxOn); if(sfxOn) blip(760,.07);
+});
+
+addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT') { if(e.key==='Escape') e.target.blur(); return; }
+  if(e.key===' '){ e.preventDefault(); armMic(); }
+  if(e.key==='/'){ e.preventDefault(); $('chatin').focus(); }
+  if(e.key==='Escape'){ stopSpeaking(); armed=false; setListening(false); $('modal').hidden=true; }
+  if(e.key==='ArrowRight') FACE.next();
+  if(e.key==='ArrowLeft') FACE.prev();
+});
+
+/* ============================================================
+   6. AI chat box — conversational chat with the brain
+   ============================================================ */
+let chatSession = localStorage.getItem('jarvis_chat_session');
+if(!chatSession){
+  chatSession = 's-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  localStorage.setItem('jarvis_chat_session', chatSession);
+}
+const chatEl=$('chatbox'), chatLog=$('chatlog'), chatIn=$('chatin2'), chatSend=$('chatsend');
+let chatOpen=false, chatBusy=false;
+
+function setChat(open){
+  chatOpen=open;
+  chatEl.classList.toggle('open',open);
+  $('chatfab').style.display = open ? 'none' : 'flex';
+  if(open){ chatIn.focus(); chatLog.scrollTop=chatLog.scrollHeight; }
+}
+$('chatfab').addEventListener('click',()=>setChat(true));
+$('chatclose').addEventListener('click',()=>setChat(false));
+
+function addChat(role, text, typing){
+  const d=document.createElement('div');
+  d.className='msg '+(role==='you'?'you':'ai');
+  const who=document.createElement('div'); who.className='who';
+  who.textContent= role==='you' ? 'you' : 'richie jarvis';
+  const b=document.createElement('div'); b.className='bubble'+(typing?' typing':'');
+  b.textContent=text;
+  d.appendChild(who); d.appendChild(b);
+  chatLog.appendChild(d);
+  chatLog.scrollTop=chatLog.scrollHeight;
+  return b;
+}
+
+function cleanReply(t){
+  if(!t) return '';
+  t = String(t).trim();
+  // strip markdown code fences / stray quotes the model sometimes returns
+  t = t.replace(/^```[a-zA-Z]*\n?/,'').replace(/\n?```$/,'').trim();
+  t = t.replace(/^["']|["']$/g,'').trim();
+  return t;
+}
+
+async function sendChat(){
+  const v=chatIn.value.trim();
+  if(!v || chatBusy) return;
+  chatIn.value='';
+  addChat('you', v);
+  chatBusy=true;
+  const bubble=addChat('ai','…', true);
+  blip(520,.06,'square',.04);
+  try{
+    const r=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text:v, session:chatSession})});
+    const data=await r.json();
+    bubble.classList.remove('typing');
+    const reply = cleanReply(data.reply) || '…';
+    bubble.textContent = reply;
+  }catch(e){
+    bubble.classList.remove('typing');
+    bubble.textContent='Chat brain unreachable. Make sure start_jarvis.bat is running.';
+  }
+  chatLog.scrollTop=chatLog.scrollHeight;
+  chatIn.focus();
+  chatBusy=false;
+}
+chatSend.addEventListener('click', sendChat);
+chatIn.addEventListener('keydown', e=>{
+  if(e.key==='Enter'){ e.preventDefault(); sendChat(); }
+  if(e.key==='Escape'){ e.preventDefault(); setChat(false); }
+});
+
+/* boot */
+(function boot(){
+  const lines=[
+    ['system','bit-face renderer online'],
+    ['system','voice channel armed — say “Richie Jarvis, …”'],
+    ['system','space = talk · / = type · esc = stop']
+  ];
+  lines.forEach((l,i)=>setTimeout(()=>log('jarvis',l[0],l[1]),300+i*420));
+  setTimeout(()=>typeOut($('reply'),'Standing by, Richie.'),1400);
+})();
+</script>
+</body>
+</html>
