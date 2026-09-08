@@ -1,4 +1,6 @@
+import ctypes
 import json
+import math
 import os
 import re
 import subprocess
@@ -11,14 +13,35 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PORT = 8765
+PORT = int(os.environ.get("JARVIS_PORT", "8765"))
+# Jarvis drives your mouse, so by default it only listens on this machine.
+# Set JARVIS_HOST=0.0.0.0 if you deliberately want LAN access.
+HOST = os.environ.get("JARVIS_HOST", "127.0.0.1")
+VERSION = "2.0"
 
-_state = {"last_spoken": ""}
+_state = {"last_spoken": "", "abort": False, "last_artifact": None,
+          "pending_artifact": None, "last_model": "", "tools_ok": True}
+_ACTION_LOG: list = []
+_ACTION_LOG_LOCK = threading.Lock()
+
+try:
+    import draw as drawlib
+except Exception as _e:            # pragma: no cover - only if files are missing
+    drawlib = None
+    print("[jarvis] draw.py unavailable:", _e)
+try:
+    import model3d as m3d
+except Exception as _e:            # pragma: no cover
+    m3d = None
+    print("[jarvis] model3d.py unavailable:", _e)
 
 
 def _pyautogui():
     import pyautogui
-    pyautogui.FAILSAFE = False
+    # FAILSAFE: slam the mouse into a screen corner to kill any action.
+    # It is on by default now that a language model is moving the pointer.
+    pyautogui.FAILSAFE = bool(load_config().get("failsafe", True))
+    pyautogui.PAUSE = 0.01
     return pyautogui
 
 
@@ -30,181 +53,598 @@ def _psutil():
 APPS = {
     "notepad": "notepad.exe",
     "calculator": "calc.exe",
+    "calc": "calc.exe",
     "paint": "mspaint.exe",
+    "ms paint": "mspaint.exe",
+    "paint 3d": "ms-paint:",
+    "3d viewer": "ms-3dviewer:",
+    "screenshot tool": "ms-screenclip:",
     "explorer": "explorer.exe",
     "file explorer": "explorer.exe",
     "cmd": "cmd.exe",
     "command prompt": "cmd.exe",
+    "terminal": "wt.exe",
+    "powershell": "powershell.exe",
     "task manager": "taskmgr.exe",
     "settings": "ms-settings:",
     "chrome": "chrome",
     "google chrome": "chrome",
     "edge": "msedge",
     "microsoft edge": "msedge",
+    "firefox": "firefox",
     "spotify": "spotify:",
     "whatsapp": "whatsapp:",
+    "discord": "discord",
+    "steam": "steam",
+    "telegram": "telegram",
     "vs code": "code",
     "code": "code",
+    "visual studio code": "code",
+    "notepad++": "notepad++",
     "word": "winword",
     "excel": "excel",
+    "powerpoint": "powerpnt",
+    "blender": "blender",
+    "obs": "obs64",
 }
+
+# --------------------------------------------------------------------------
+# providers / configuration
+# --------------------------------------------------------------------------
+
+PROVIDERS = {
+    "openrouter": {
+        "label": "OpenRouter (free models)",
+        "base_url": "https://openrouter.ai/api/v1",
+        "models_url": "https://openrouter.ai/api/v1/models",
+        "model": "openrouter/free",
+    },
+    "zen": {
+        "label": "OpenCode Zen",
+        "base_url": "https://opencode.ai/zen/v1",
+        "models_url": "https://opencode.ai/zen/v1/models",
+        "model": "big-pickle",
+    },
+    "custom": {
+        "label": "Custom (OpenAI-compatible)",
+        "base_url": "",
+        "models_url": "",
+        "model": "",
+    },
+}
+
+# Used when the provider's live model list cannot be fetched. Free model IDs
+# rotate constantly, so the UI always prefers the live list (GET /models).
+FALLBACK_MODELS = [
+    "qwen/qwen3-coder:free",
+    "deepseek/deepseek-v4-flash:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "stepfun/step-3.5-flash:free",
+    "z-ai/glm-4.5-air:free",
+    "google/gemma-4-31b-it:free",
+    "openai/gpt-oss-120b:free",
+]
+ZEN_FALLBACKS = [
+    "big-pickle", "deepseek-v4-flash-free", "mimo-v2.5-free",
+    "nemotron-3-ultra-free", "qwen3.6-plus-free", "minimax-m3-free",
+]
 
 CONTACTS_FILE = os.path.join(BASE_DIR, "contacts.json")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+CONFIG_LOCAL_FILE = os.path.join(BASE_DIR, "config.local.json")
+
+# Secrets live in config.local.json (git-ignored) so a key can never be
+# committed by accident. config.json only ever holds harmless settings.
+SECRET_KEYS = ("api_key",)
 
 DEFAULT_CONFIG = {
+    "provider": "openrouter",
     "api_key": "",
-    "base_url": "https://opencode.ai/zen/v1",
-    "model": "x-preview-f-free",
+    "base_url": "",          # empty -> use the provider default
+    "model": "",             # empty -> use the provider default
+    "fallbacks": [],
+    "listen": False,
+    "secretary": False,
+    "listen_threshold": 350,
+    "answer_pos": [0, 0],
+    "safe_mode": True,       # ask before destructive shell commands
+    "failsafe": True,        # corner-of-screen mouse abort
+    "speed": 1.0,            # mouse speed multiplier
+    "max_actions": 6,        # cap on chained actions per command
 }
+
+
+def _read_json_file(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            cfg.update(json.load(f))
-    except Exception:
-        pass
-    env_key = os.environ.get("OPENCODE_API_KEY")
-    if not cfg.get("api_key") and env_key:
+    cfg.update(_read_json_file(CONFIG_FILE))
+    cfg.update(_read_json_file(CONFIG_LOCAL_FILE))
+    # env vars win, so keys can be injected without touching disk
+    env_key = (os.environ.get("JARVIS_API_KEY")
+               or os.environ.get("OPENROUTER_API_KEY")
+               or os.environ.get("OPENCODE_API_KEY"))
+    if env_key:
         cfg["api_key"] = env_key
+    if not cfg.get("provider"):
+        cfg["provider"] = "openrouter"
     return cfg
 
 
 def save_config(cfg):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
+    """Write settings to config.json and secrets to config.local.json."""
+    public = _read_json_file(CONFIG_FILE)
+    secret = _read_json_file(CONFIG_LOCAL_FILE)
+    for k, v in cfg.items():
+        if v is None:
+            continue
+        if k in SECRET_KEYS:
+            secret[k] = v
+            public.pop(k, None)      # never keep a key in the tracked file
+        else:
+            public[k] = v
+    for path, data in ((CONFIG_FILE, public), (CONFIG_LOCAL_FILE, secret)):
+        tmp = {}
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print("[jarvis] could not write %s: %s" % (path, e))
+        del tmp
+    return True
 
 
-SYSTEM_PROMPT = """You are Richie Jarvis, a witty AI butler running locally on the PC of your boss, {owner}.
-You control the computer by returning actions. Reply with ONLY valid JSON, no markdown:
-{"speak": "<short spoken reply, 1-2 sentences>", "action": null}
-or
-{"speak": "<short spoken confirmation>", "action": {"name": "...", "arg": "..."}}
-
-Available actions:
-{"name": "open_app", "arg": "<app like notepad, calculator, chrome, spotify, vs code>"}
-{"name": "search_web", "arg": "<query>", "engine": "google|youtube|wikipedia"}
-{"name": "screenshot"}
-{"name": "press_key", "arg": "volumeup|volumedown|volumemute|playpause|nexttrack|prevtrack|enter"}
-{"name": "type_text", "arg": "<text to type on the active window>"}
-{"name": "send_chat", "arg": "<message to type AND send (press Enter) in the active, already-open chat window>"},
-{"name": "whatsapp_message", "contact": "<phone number with country code OR a saved contact name like father, mother>", "message": "<the text to send>"}
-{"name": "open_url", "arg": "<full url or domain like example.com>"}
-{"name": "run_command", "arg": "<any Windows shell command, e.g. 'echo hi', 'dir', 'notepad file.txt'>"}
-{"name": "mouse", "action": "click|double_click|right_click|move|scroll", "x": <int>, "y": <int>}
-{"name": "whatsapp_call", "arg": "<phone number with country code or contact name>", "video": false}
-{"name": "active_window", "arg": null}
-{"name": "list_apps", "arg": null}
-{"name": "say_aloud", "arg": "<text to speak through the speakers>"}
-
-The PC owner's name is {owner}. If asked who they are or what their name is, answer "{owner}".
-Family members are stored by relation: father, mother, etc.
-Rules: If the user asks to do something on the computer, pick the matching action.
-If asked to send a WhatsApp message to a SPECIFIC person (e.g. "message my father hello", "chat mother good night"), use whatsapp_message with the contact name/number and the message text. This opens their chat and sends it.
-Only use send_chat when the user already has the right chat window open and focused and just wants text typed there.
-If asked which app or window is currently focused/open, use active_window. To list running programs, use list_apps. You can detect ANY application this way, not only WhatsApp.
-If asked to open a website, use open_url. If asked to run a program or shell task, use run_command.
-If asked to click/move/scroll the mouse, use mouse with screen coordinates.
-If asked to call someone (e.g. "call my father"), use whatsapp_call with the relation or name.
-If it is a question or small talk, set action to null and answer briefly in speak.
-run_command can do almost anything on this PC, so use it for tasks not covered by other actions.
-Never output anything except the JSON object."""
+def cfg_base_url(cfg):
+    return (cfg.get("base_url") or "").strip() or \
+        PROVIDERS.get(cfg.get("provider", "openrouter"), {}).get("base_url", "")
 
 
-def system_prompt():
-    return SYSTEM_PROMPT.replace("{owner}", contact_owner())
+def cfg_model(cfg):
+    return (cfg.get("model") or "").strip() or \
+        PROVIDERS.get(cfg.get("provider", "openrouter"), {}).get("model", "")
 
 
-FALLBACK_MODELS = ["mimo-v2.5-free", "hy3-free",
-                   "nemotron-3.5-lightning-free", "laguna-s-2.1-free"]
-
-
-def _candidate_models(cfg):
+def candidate_models(cfg):
+    """Primary model first, then fallbacks, de-duplicated."""
     models = []
-    if cfg.get("model"):
-        models.append(cfg["model"])
-    for m in FALLBACK_MODELS:
-        if m not in models:
+    for m in [cfg_model(cfg)] + list(cfg.get("fallbacks") or []):
+        m = str(m or "").strip()
+        if m and m not in models:
             models.append(m)
+    if not models:
+        pool = ZEN_FALLBACKS if cfg.get("provider") == "zen" else FALLBACK_MODELS
+        models = list(pool)
     return models
 
 
-def _call_brain(messages, max_tokens=300, temperature=0.5):
-    """Send chat messages to the Zen brain. Returns (content, error)."""
-    cfg = load_config()
+def _screen_size():
+    try:
+        w, h = _pyautogui().size()
+        return int(w), int(h)
+    except Exception:
+        return 0, 0
+
+
+# --------------------------------------------------------------------------
+# the action catalogue
+#
+# Defined once as OpenAI function-calling schemas. The same list is sent as
+# native `tools` when the model supports it, and is rendered into the system
+# prompt for models that can only reply with JSON - so both paths stay in sync.
+# --------------------------------------------------------------------------
+
+def _enum(values):
+    return {"type": "string", "enum": sorted(values)}
+
+
+def _tool(name, description, props, required=None):
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": props,
+                "required": required or [],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def _shape_enums():
+    shapes = sorted(drawlib.SHAPES) if drawlib else ["circle", "rect", "star"]
+    pictures = sorted(drawlib.PICTURES) if drawlib else ["house", "robot", "cat"]
+    models = sorted(m3d.MODELS) if m3d else ["cube", "sphere"]
+    return shapes, pictures, models
+
+
+def build_tools():
+    shapes, pictures, models = _shape_enums()
+    return [
+        _tool("open_app", "Open or launch a desktop app or Windows app.",
+              {"name": {"type": "string", "description":
+                        "app name, e.g. notepad, calculator, paint, chrome, spotify, vs code, blender"}},
+              ["name"]),
+        _tool("open_url", "Open a website in the default browser.",
+              {"url": {"type": "string", "description": "full url or bare domain like example.com"}},
+              ["url"]),
+        _tool("search_web", "Search the web.",
+              {"query": {"type": "string", "description": "what to search for"},
+               "engine": _enum(["google", "youtube", "wikipedia"])},
+              ["query"]),
+        _tool("run_command", "Run a Windows shell command.",
+              {"command": {"type": "string", "description": "shell command, e.g. 'dir' or 'echo hi'"}},
+              ["command"]),
+        _tool("mouse", "Move, click, drag or scroll the real mouse pointer.",
+              {"op": _enum(["move", "click", "double_click", "right_click", "middle_click",
+                            "drag", "scroll", "position"]),
+               "x": {"type": "integer", "description": "target x in screen pixels"},
+               "y": {"type": "integer", "description": "target y in screen pixels"},
+               "x2": {"type": "integer", "description": "drag end x"},
+               "y2": {"type": "integer", "description": "drag end y"},
+               "clicks": {"type": "integer", "description": "number of clicks (default 1)"},
+               "duration": {"type": "number", "description": "seconds the movement should take (default 0.4)"}},
+              ["op"]),
+        _tool("draw", "Draw a geometric shape by dragging the mouse in the active paint app.",
+              {"shape": _enum(shapes),
+               "x": {"type": "integer", "description": "left of the drawing box in pixels"},
+               "y": {"type": "integer", "description": "top of the drawing box in pixels"},
+               "w": {"type": "integer", "description": "box width in pixels"},
+               "h": {"type": "integer", "description": "box height in pixels"},
+               "sides": {"type": "integer", "description": "polygon sides (default 5)"},
+               "points": {"type": "integer", "description": "star points (default 5)"},
+               "inner": {"type": "number", "description": "star inner ratio 0-1 (default 0.42)"},
+               "turns": {"type": "number", "description": "spiral turns (default 3)"},
+               "cycles": {"type": "number", "description": "sine wave cycles (default 2)"},
+               "rot": {"type": "number", "description": "rotation in degrees"},
+               "sweep": {"type": "number", "description": "arc sweep in degrees (default 360)"},
+               "stroke": {"type": "number", "description": "preview stroke width, unused"}}),
+        _tool("picture", "Draw a composed picture (a little line drawing) with the mouse.",
+              {"name": _enum(pictures),
+               "x": {"type": "integer", "description": "left of the drawing box in pixels"},
+               "y": {"type": "integer", "description": "top of the drawing box in pixels"},
+               "w": {"type": "integer", "description": "box width in pixels"},
+               "h": {"type": "integer", "description": "box height in pixels"}}),
+        _tool("model3d", "Generate a real 3D model file (OBJ/STL) and open it on the desktop.",
+              {"kind": _enum(models),
+               "fmt": _enum(["obj", "stl", "both"]),
+               "w": {"type": "number", "description": "width for box-like models"},
+               "h": {"type": "number", "description": "height"},
+               "d": {"type": "number", "description": "depth for box-like models"},
+               "r": {"type": "number", "description": "radius for round models"},
+               "R": {"type": "number", "description": "ring radius for torus/donut"},
+               "base": {"type": "number", "description": "pyramid base width"},
+               "sides": {"type": "number", "description": "number of sides/facets"},
+               "teeth": {"type": "number", "description": "gear tooth count"},
+               "open": {"type": "boolean", "description": "open the file when done (default true)"}}),
+        _tool("keyboard", "Type text, press keys or press a hotkey combination.",
+              {"op": _enum(["type", "press", "hotkey"]),
+               "text": {"type": "string", "description": "text to type (op=type)"},
+               "key": {"type": "string", "description": "single key (op=press), e.g. enter, esc, tab, space, volumeup"},
+               "keys": {"type": "array", "items": {"type": "string"},
+                        "description": "hotkey parts (op=hotkey), e.g. ['ctrl','c']"},
+               "times": {"type": "integer", "description": "repeat count for op=press (default 1)"}},
+              ["op"]),
+        _tool("window", "Find, move, resize, focus, minimize, maximize or close a window.",
+              {"op": _enum(["list", "active", "move", "resize", "focus", "close",
+                            "minimize", "maximize"]),
+               "title": {"type": "string", "description": "part of the window title to match"},
+               "x": {"type": "integer", "description": "new left position"},
+               "y": {"type": "integer", "description": "new top position"},
+               "w": {"type": "integer", "description": "new width"},
+               "h": {"type": "integer", "description": "new height"}},
+              ["op"]),
+        _tool("whatsapp", "Send a WhatsApp message or start a WhatsApp call.",
+              {"op": _enum(["message", "call", "video_call"]),
+               "contact": {"type": "string", "description": "contact name or number with country code"},
+               "message": {"type": "string", "description": "message text (op=message)"}},
+              ["op", "contact"]),
+        _tool("clipboard", "Copy text to the Windows clipboard.",
+              {"text": {"type": "string", "description": "text to copy"}}, ["text"]),
+        _tool("wait", "Pause before the next action (lets apps finish opening).",
+              {"seconds": {"type": "number", "description": "seconds to wait (max 10)"}}, ["seconds"]),
+        _tool("screenshot", "Take a screenshot and save it to the desktop.", {}),
+        _tool("system_info", "Report the time, date, CPU, memory and battery.", {}),
+        _tool("say_aloud", "Speak a sentence through the PC speakers.",
+              {"text": {"type": "string", "description": "what to say"}}, ["text"]),
+    ]
+
+
+TOOLS = build_tools()
+TOOL_NAMES = [t["function"]["name"] for t in TOOLS]
+
+
+def _tool_help_lines():
+    lines = []
+    for t in TOOLS:
+        fn = t["function"]
+        props = fn.get("parameters", {}).get("properties", {}) or {}
+        required = set(fn.get("parameters", {}).get("required") or [])
+        bits = []
+        for k, v in props.items():
+            desc = v.get("description", "")
+            if v.get("enum"):
+                desc = (desc + " one of: " + ", ".join(str(x) for x in v["enum"])).strip(" ")
+            bits.append(k + ("" if k in required else "?") + ("=" + desc if desc else ""))
+        lines.append("- %s(%s): %s" % (fn["name"], ", ".join(bits), fn.get("description", "")))
+    return "\n".join(lines)
+
+
+SYSTEM_PROMPT = """You are Richie Jarvis, a witty AI butler that really controls the Windows PC of your boss, {owner}.
+
+Reply with ONE JSON object and nothing else - no markdown, no code fences:
+{{"speak": "<1-2 short sentences to say out loud>", "actions": [{{"name": "...", ...parameters}}]}}
+
+Actions you can run:
+{tools}
+
+How to behave:
+- Use "actions": [] when you are only chatting or answering a question.
+- Chain actions when a job needs steps, for example drawing a circle:
+  [{{"name":"open_app","name":"paint"}}, {{"name":"wait","seconds":3}}, {{"name":"draw","shape":"circle"}}]
+- For 3D models use model3d and pick a kind from the list; the file is written to the desktop and opened.
+- {screen}
+- Coordinates are screen pixels with 0,0 at the top-left. Pick sensible values.
+- Never invent action names or parameters that are not listed.
+- Keep "speak" short and in the same language the user spoke.{extra}"""
+
+
+def system_prompt():
+    w, h = _screen_size()
+    screen = ("The screen is %dx%d pixels." % (w, h)) if w and h else \
+        "Assume a 1920x1080 screen."
+    extra = ""
+    if load_config().get("safe_mode", True):
+        extra = ("\n- Destructive shell commands are blocked, so do not try to delete or "
+                 "format anything.")
+    return SYSTEM_PROMPT.format(owner=contact_owner(), tools=_tool_help_lines(),
+                                screen=screen, extra=extra)
+
+
+# --------------------------------------------------------------------------
+# talking to the brain
+# --------------------------------------------------------------------------
+
+TOOL_UNSUPPORTED = "__tools_unsupported__"
+
+
+def _http_json(url, payload=None, cfg=None, headers=None, timeout=45):
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _brain_headers(cfg):
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer %s" % cfg.get("api_key", ""),
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) jarvis-local/%s" % VERSION,
+    }
+    if cfg.get("provider") == "openrouter":
+        # optional, but gets the app attributed on the OpenRouter leaderboards
+        headers["HTTP-Referer"] = "http://localhost:%d" % PORT
+        headers["X-OpenRouter-Title"] = "Richie Jarvis"
+    return headers
+
+
+def _call_brain(messages, cfg, max_tokens=400, temperature=0.4, tools=None):
+    """Send a chat request. Returns ``(message_dict, error)``.
+
+    ``message_dict`` is the raw assistant message, so ``tool_calls`` survive.
+    Retries 5xx once per model, then walks the fallback model list.
+    """
     if not cfg.get("api_key"):
         return None, "no api key configured"
+    url = cfg_base_url(cfg).rstrip("/") + "/chat/completions"
+    if not url.startswith("http"):
+        return None, "no API base url configured"
+    headers = _brain_headers(cfg)
     last_err = "unknown error"
-    for model in _candidate_models(cfg):
+
+    for model in candidate_models(cfg):
         for attempt in range(2):
-            url = cfg["base_url"].rstrip("/") + "/chat/completions"
-            payload = json.dumps({
+            payload = {
                 "model": model,
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
-            }).encode()
-            req = urllib.request.Request(url, data=payload, headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {cfg['api_key']}",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) jarvis-local/1.0",
-                "Accept": "application/json",
-            })
+            }
+            if tools:
+                payload["tools"] = tools
+                payload["tool_choice"] = "auto"
             try:
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    data = json.loads(resp.read().decode("utf-8", "replace"))
-                content = str(data["choices"][0]["message"]["content"] or "").strip()
-                if not content:
-                    last_err = f"model {model} returned empty content"
-                    print(f"[jarvis] {last_err} - trying next...")
-                    break
-                return content, ""
+                data = _http_json(url, payload, cfg, headers)
             except urllib.error.HTTPError as e:
                 try:
-                    detail = json.loads(e.read().decode()).get("error", {}).get("message", "")
+                    detail = json.loads(e.read().decode("utf-8", "replace")) \
+                        .get("error", {}).get("message", "")
                 except Exception:
                     detail = ""
                 if e.code in (401, 403):
-                    return None, "My brain rejected the API key. Open settings and paste a valid OpenCode Zen key."
-                last_err = f"model {model} error {e.code}: {detail[:100]}"
+                    return None, ("the API key was rejected - open the gear icon and paste a valid key")
+                if e.code == 402:
+                    return None, ("out of credits on this provider - free models only need "
+                                  "credits to lift the daily request cap")
+                if e.code == 429:
+                    last_err = ("rate limited (free tier is 50 requests/day, or 1,000/day "
+                                "after buying $10 of credits)")
+                    time.sleep(1.0)
+                    continue
+                if e.code in (400, 404) and tools and ("tool" in (detail or "").lower()):
+                    return None, TOOL_UNSUPPORTED
+                last_err = "model %s error %s: %s" % (model, e.code, (detail or "")[:120])
                 if e.code >= 500:
-                    time.sleep(0.5)
+                    time.sleep(0.6)
                     continue
                 break
             except Exception as e:
                 last_err = str(e)
-                time.sleep(0.5)
-        print(f"[jarvis] model '{model}' failed ({last_err}) - trying fallback...")
+                time.sleep(0.6)
+                continue
+
+            try:
+                msg = data["choices"][0]["message"] or {}
+            except Exception:
+                last_err = "unexpected response from %s" % model
+                break
+            content = msg.get("content")
+            if not content and not msg.get("tool_calls"):
+                last_err = "model %s returned an empty reply" % model
+                break
+            _state["last_model"] = str(data.get("model") or model)
+            return msg, ""
+
+        print("[jarvis] model '%s' failed (%s) - trying the next one..." % (model, last_err))
     return None, last_err
 
 
-def llm_reply(text):
-    content, err = _call_brain([
-        {"role": "system", "content": system_prompt()},
-        {"role": "user", "content": text},
-    ], max_tokens=220, temperature=0.4)
-    if content is None:
-        return f"I could not reach my brain. {err}"
-    obj = {}
-    m = re.search(r"\{.*\}", content, re.S)
+def _extract_json(content):
+    """Pull the first JSON object out of a reply, tolerating prose/fences."""
+    if not content:
+        return {}
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text).strip()
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", text, re.S)
     if m:
         try:
             obj = json.loads(m.group(0))
+            return obj if isinstance(obj, dict) else {}
         except Exception:
-            obj = {}
-    elif content.startswith("{"):
+            pass
+    return {}
+
+
+def _actions_from_message(msg):
+    """Normalise either native tool_calls or a JSON reply into action dicts."""
+    actions = []
+    for tc in (msg.get("tool_calls") or []):
+        fn = tc.get("function") or {}
         try:
-            obj = json.loads(content)
+            args = json.loads(fn.get("arguments") or "{}")
         except Exception:
-            obj = {}
-    speak_text = str(obj.get("speak") or "").strip() or content.strip() or "Done."
-    action = obj.get("action")
-    if isinstance(action, dict) and action.get("name"):
-        result = run_action(action)
-        return result if result else speak_text
-    return speak_text
+            args = {}
+        if not isinstance(args, dict):
+            args = {}
+        name = fn.get("name")
+        if name:
+            actions.append(dict(args, name=name))
+
+    obj = _extract_json(msg.get("content") or "")
+    if obj:
+        one = obj.get("action")
+        many = obj.get("actions")
+        if isinstance(many, list):
+            actions.extend([a for a in many if isinstance(a, dict) and a.get("name")])
+        elif isinstance(one, dict) and one.get("name"):
+            actions.append(one)
+    return actions, obj
+
+
+def _speak_from_message(msg, obj):
+    content = (msg.get("content") or "").strip()
+    speak = str(obj.get("speak") or "").strip()
+    if not speak and content and not obj.get("action") and not obj.get("actions") \
+            and not msg.get("tool_calls"):
+        speak = content
+    return speak
+
+
+def _set_artifact(kind, title, detail="", svg="", path=""):
+    _state["pending_artifact"] = {
+        "kind": kind, "title": title, "detail": detail,
+        "svg": svg, "path": path,
+        "time": datetime.now().strftime("%H:%M:%S"),
+    }
+
+
+def log_action(name, params, result):
+    with _ACTION_LOG_LOCK:
+        _ACTION_LOG.append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "name": name,
+            "params": params,
+            "result": str(result)[:300],
+        })
+        if len(_ACTION_LOG) > 60:
+            del _ACTION_LOG[:-60]
+
+
+def run_action_list(actions):
+    """Execute a chain of actions, honouring the abort flag between steps."""
+    cfg = load_config()
+    cap = max(1, min(12, int(cfg.get("max_actions", 6) or 6)))
+    results = []
+    for raw in actions[:cap]:
+        if _state.get("abort"):
+            results.append("Stopped.")
+            break
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            continue
+        params = {k: v for k, v in raw.items() if k != "name"}
+        try:
+            out = run_action(name, params)      # run_action() logs each step
+        except Exception as e:
+            out = "%s failed: %s" % (name, e)
+        if out:
+            results.append(str(out))
+    return results
+
+
+def llm_reply(text):
+    """Ask the brain what to do, then do it. Returns the spoken reply."""
+    cfg = load_config()
+    if not cfg.get("api_key"):
+        return ("My brain is not connected. Open the gear icon, pick a provider, paste "
+                "an API key and choose one of the free models.")
+    _state["pending_artifact"] = None
+    messages = [
+        {"role": "system", "content": system_prompt()},
+        {"role": "user", "content": text},
+    ]
+    use_tools = bool(_state.get("tools_ok", True))
+    msg, err = _call_brain(messages, cfg, max_tokens=360, temperature=0.3,
+                           tools=TOOLS if use_tools else None)
+    if msg is None and err == TOOL_UNSUPPORTED:
+        # some free endpoints reject `tools`; remember that and ask again in JSON mode
+        print("[jarvis] this model refuses tool calls - falling back to JSON mode")
+        _state["tools_ok"] = False
+        msg, err = _call_brain(messages, cfg, max_tokens=360, temperature=0.3, tools=None)
+    if msg is None:
+        return "I could not reach my brain. %s" % err
+
+    actions, obj = _actions_from_message(msg)
+    speak = _speak_from_message(msg, obj)
+    if not actions:
+        return speak or "Done."
+    results = run_action_list(actions)
+    artifact = _state.get("pending_artifact")
+    if artifact:
+        _state["last_artifact"] = artifact
+    if results:
+        joined = " ".join(r for r in results if r)
+        return (speak + " " + joined).strip() if speak else joined
+    return speak or "Done."
 
 
 # ---------- conversational chat ----------
@@ -232,10 +672,12 @@ def chat_reply(session, text):
             hist = hist[-24:]
             _CHAT_SESSIONS[session] = hist
         messages = [{"role": "system", "content": CHAT_SYSTEM}] + list(hist)
-    content, err = _call_brain(messages, max_tokens=500, temperature=0.7)
-    if content is None:
+    msg, err = _call_brain(messages, cfg, max_tokens=500, temperature=0.7)
+    if msg is None:
         return f"I couldn't reach my brain right now. {err}"
-    reply = content.strip()
+    reply = (msg.get("content") or "").strip()
+    if not reply:
+        return "My brain came back blank. Try that again."
     if reply.startswith("```"):
         reply = re.sub(r"^```[a-zA-Z]*\n?", "", reply)
         reply = re.sub(r"\n?```$", "", reply).strip()
@@ -247,47 +689,532 @@ def chat_reply(session, text):
     return reply
 
 
-def run_action(action):
-    name = action.get("name")
-    arg = action.get("arg")
+# --------------------------------------------------------------------------
+# mouse movement engine
+#
+# The model asks for a destination; this decides how the pointer gets there.
+# Every loop checks the abort flag so the STOP button (or slamming the mouse
+# into a corner) kills a runaway action immediately.
+# --------------------------------------------------------------------------
+
+def _ease(t: float) -> float:
+    """Smoothstep: start and stop gently instead of snapping."""
+    t = 0.0 if t < 0 else (1.0 if t > 1 else t)
+    return t * t * (3 - 2 * t)
+
+
+def _speed_factor() -> float:
+    try:
+        return max(0.25, min(4.0, float(load_config().get("speed", 1.0) or 1.0)))
+    except Exception:
+        return 1.0
+
+
+def _aborted() -> bool:
+    return bool(_state.get("abort"))
+
+
+def mouse_move_to(x, y, duration=0.4):
+    """Glide the pointer to (x, y). Returns False if the run was aborted."""
+    pag = _pyautogui()
+    sx, sy = pag.position()
+    duration = max(0.0, float(duration or 0.0)) / _speed_factor()
+    dist = math.hypot(x - sx, y - sy)
+    steps = int(min(160, max(10, dist / 14.0)))
+    for i in range(1, steps + 1):
+        if _aborted():
+            return False
+        f = _ease(i / steps)
+        pag.moveTo(int(sx + (x - sx) * f), int(sy + (y - sy) * f))
+        if duration:
+            time.sleep(duration / steps)
+    pag.moveTo(int(x), int(y))
+    return True
+
+
+def mouse_follow(points, duration=None, button=None, spacing=6.0):
+    """Walk the pointer through a list of points, optionally dragging."""
+    pag = _pyautogui()
+    pts = list(points)
+    if len(pts) < 2:
+        return True
+    length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
+    if duration is None:
+        duration = max(0.3, min(8.0, length / 850.0)) / _speed_factor()
+    else:
+        duration = max(0.0, float(duration)) / _speed_factor()
+    dt = duration / max(1, len(pts) - 1)
+    try:
+        pag.moveTo(int(pts[0][0]), int(pts[0][1]))
+        if button:
+            pag.mouseDown(button=button)
+        for (x, y) in pts[1:]:
+            if _aborted():
+                return False
+            pag.moveTo(int(x), int(y))
+            if dt:
+                time.sleep(dt)
+    finally:
+        if button:
+            try:
+                pag.mouseUp(button=button)
+            except Exception:
+                pass
+    return True
+
+
+def mouse_now():
+    try:
+        x, y = _pyautogui().position()
+        return "The mouse is at %d,%d." % (x, y)
+    except Exception as e:
+        return "I cannot read the mouse position. %s" % e
+
+
+# --------------------------------------------------------------------------
+# drawing
+# --------------------------------------------------------------------------
+
+_DRAW_NUM_KEYS = ("sides", "points", "inner", "turns", "cycles", "rot",
+                  "sweep", "steps", "rx", "ry", "inset", "angle", "rays",
+                  "petals", "amp", "stroke")
+
+
+def drawing_box(params):
+    """Work out where on screen a drawing should land."""
+    w, h = _screen_size()
+    if not w:
+        w, h = 1920, 1080
+    bw = int(params.get("w") or w * 0.46)
+    bh = int(params.get("h") or h * 0.46)
+    bx = int(params["x"]) if params.get("x") is not None else (w - bw) // 2
+    by = int(params["y"]) if params.get("y") is not None else (h - bh) // 2
+    return (bx, by, bw, bh)
+
+
+def _num(params, key, default=None):
+    v = params.get(key, None)
+    if v is None:
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def draw_action(params):
+    """Draw a shape or picture by dragging the mouse in whatever app is open."""
+    if drawlib is None:
+        return "My drawing engine is missing (draw.py next to server.py)."
+    kind = str(params.get("shape") or params.get("name") or "").strip().lower()
+    is_picture = False
+    if not kind:
+        kind = str(params.get("picture") or "").strip().lower()
+        is_picture = True
+    if not kind:
+        return "Tell me what to draw."
+
+    registry = drawlib.PICTURES if is_picture else drawlib.SHAPES
+    if kind not in registry:
+        near = [k for k in registry if kind and (kind in k or k in kind)]
+        if near:
+            kind = near[0]
+        else:
+            return ("I cannot draw '%s'. I know: %s"
+                    % (kind, ", ".join(sorted(registry))))
+
+    kwargs = {}
+    for key in _DRAW_NUM_KEYS:
+        v = _num(params, key)
+        if v is not None:
+            kwargs[key] = v
+    try:
+        strokes = registry[kind](**kwargs)
+    except TypeError:
+        strokes = registry[kind]()
+    if not strokes:
+        return "That shape produced no lines."
+
+    box = drawing_box(params)
+    paths = drawlib.fit_strokes(strokes, box)
+    points = sum(len(p) for p in paths)
+    svg = drawlib.strokes_to_svg(strokes, color="#6fffe0")
+    _set_artifact("draw", "drawing · %s" % kind,
+                  "%d strokes, %d mouse points, box %dx%d at %d,%d"
+                  % (len(paths), points, box[2], box[3], box[0], box[1]),
+                  svg=svg)
+
+    try:
+        for path in paths:
+            if len(path) < 2:
+                continue
+            line = drawlib.resample(path, 5.0)
+            if not mouse_follow(line, button="left"):
+                return "Drawing stopped."
+    except Exception as e:
+        return "Drawing failed. Run setup.bat to install pyautogui. (%s)" % e
+    return "Drew a %s with %d strokes." % (kind, len(paths))
+
+
+# --------------------------------------------------------------------------
+# 3D models
+# --------------------------------------------------------------------------
+
+def artifact_dir():
+    desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+    base = os.path.join(desktop, "Jarvis3D") if os.path.isdir(desktop) \
+        else os.path.join(BASE_DIR, "models")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        base = BASE_DIR
+    return base
+
+
+def model3d_action(params):
+    if m3d is None:
+        return "My 3D engine is missing (model3d.py next to server.py)."
+    kind = str(params.get("kind") or params.get("name") or "cube").strip().lower()
+    if kind not in m3d.MODELS:
+        return ("I cannot model '%s'. I can build: %s"
+                % (kind, ", ".join(sorted(m3d.MODELS))))
+    allowed = set(m3d.MODEL_PARAMS.get(kind, {}))
+    kwargs = {}
+    for k in allowed:
+        v = _num(params, k)
+        if v is not None:
+            kwargs[k] = v
+    try:
+        mesh = m3d.make_model(kind, **kwargs)
+    except Exception as e:
+        return "That model failed to build. %s" % e
+
+    fmt = str(params.get("fmt") or "obj").strip().lower()
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    folder = artifact_dir()
+    written = []
+    try:
+        if fmt in ("obj", "both"):
+            written.append(m3d.write_obj(mesh, os.path.join(folder, "%s-%s.obj" % (kind, stamp))))
+        if fmt in ("stl", "both"):
+            written.append(m3d.write_stl(mesh, os.path.join(folder, "%s-%s.stl" % (kind, stamp))))
+        if not written:
+            written.append(m3d.write_obj(mesh, os.path.join(folder, "%s-%s.obj" % (kind, stamp))))
+    except Exception as e:
+        return "I built the model but could not save it. %s" % e
+
+    stats = m3d.mesh_stats(mesh)
+    svg = m3d.mesh_to_svg(mesh, size=480)
+    _set_artifact("model3d", "3D model · %s" % kind,
+                  "%d triangles · %s · %.1f x %.1f x %.1f cm"
+                  % (stats["faces"], "watertight" if stats["watertight"] else "open shell",
+                     stats["width"], stats["height"], stats["depth"]),
+                  svg=svg, path=written[-1])
+
+    opened = ""
+    if params.get("open", True):
+        try:
+            os.startfile(written[-1])
+            opened = " Opened it for you."
+        except Exception:
+            opened = " Saved to %s." % written[-1]
+    return ("Built a %s: %d triangles, %.1f by %.1f by %.1f units.%s"
+            % (kind, stats["faces"], stats["width"], stats["height"],
+               stats["depth"], opened))
+
+
+# --------------------------------------------------------------------------
+# windows
+# --------------------------------------------------------------------------
+
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+def enum_windows():
+    """All visible windows: ``[{'hwnd', 'title', 'rect'}]`` (rect = x,y,w,h)."""
+    user32 = ctypes.windll.user32
+    out = []
+    proto = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def cb(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(hwnd, buf, n + 1)
+                r = _RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(r))
+                out.append({"hwnd": hwnd, "title": buf.value,
+                            "rect": (r.left, r.top, max(0, r.right - r.left),
+                                     max(0, r.bottom - r.top))})
+        return True
+
+    user32.EnumWindows(proto(cb), 0)
+    return out
+
+
+def find_window(title):
+    """Best-effort match of a window by (part of) its title."""
+    needle = str(title or "").strip().lower()
+    wins = [w for w in enum_windows() if w["title"]]
+    if not needle:
+        return None
+    for w in wins:
+        if needle in w["title"].lower():
+            return w
+    for w in wins:
+        if needle in w["title"].lower().replace("-", " ").replace("—", " "):
+            return w
+    return None
+
+
+def window_action(op, title=None, x=None, y=None, w=None, h=None):
+    op = str(op or "list").strip().lower()
+    if op == "list":
+        names = [w["title"] for w in enum_windows() if w["title"]]
+        return "Open windows: " + (", ".join(names[:14]) if names else "(none found)")
+    if op == "active":
+        info = get_active_window()
+        return "Active window is %s - %s." % (info.get("app") or "?",
+                                              info.get("title") or "(untitled)")
+    win = find_window(title)
+    if not win:
+        return "I cannot find a window called %s." % (title or "(nothing given)")
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = win["hwnd"]
+        SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_SHOWWINDOW = 0x0001, 0x0002, 0x0004, 0x0040
+        if op == "focus":
+            user32.SetForegroundWindow(hwnd)
+            return "Focused %s." % win["title"]
+        if op == "move":
+            cx, cy = win["rect"][0], win["rect"][1]
+            user32.SetWindowPos(hwnd, 0, int(x if x is not None else cx),
+                                int(y if y is not None else cy), 0, 0,
+                                SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW)
+            return "Moved %s to %d,%d." % (win["title"], int(x or cx), int(y or cy))
+        if op == "resize":
+            cw, ch = win["rect"][2], win["rect"][3]
+            user32.SetWindowPos(hwnd, 0, 0, 0, int(w if w is not None else cw),
+                                int(h if h is not None else ch),
+                                SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW)
+            return "Resized %s to %dx%d." % (win["title"],
+                                             int(w or cw), int(h or ch))
+        if op == "minimize":
+            user32.ShowWindow(hwnd, 6)
+            return "Minimized %s." % win["title"]
+        if op == "maximize":
+            user32.ShowWindow(hwnd, 3)
+            return "Maximized %s." % win["title"]
+        if op == "close":
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)   # WM_CLOSE
+            return "Closed %s." % win["title"]
+    except Exception as e:
+        return "Window action failed. %s" % e
+    return "Unknown window operation %s." % op
+
+
+# --------------------------------------------------------------------------
+# keyboard + clipboard
+# --------------------------------------------------------------------------
+
+KEY_ALIASES = {
+    "enter": "enter", "return": "enter", "esc": "esc", "escape": "esc",
+    "tab": "tab", "space": "space", "backspace": "backspace",
+    "delete": "delete", "up": "up", "down": "down", "left": "left",
+    "right": "right", "home": "home", "end": "end", "pageup": "pageup",
+    "pagedown": "pagedown", "win": "win", "super": "win", "menu": "apps",
+    "volumeup": "volumeup", "volumedown": "volumedown", "volumemute": "volumemute",
+    "playpause": "playpause", "nexttrack": "nexttrack", "prevtrack": "prevtrack",
+    "f5": "f5", "f11": "f11",
+}
+
+
+def keyboard_action(op, text=None, key=None, keys=None, times=1):
+    op = str(op or "").strip().lower()
+    if op == "type":
+        return type_text(str(text or ""))
+    if op == "hotkey" or (key and "+" in str(key)):
+        parts = keys or [p for p in re.split(r"[+\-]", str(key or "")) if p]
+        if not parts:
+            return "Give me the keys to press, like ctrl and c."
+        try:
+            pag = _pyautogui()
+            pag.hotkey(*[p.strip().lower() for p in parts])
+            return "Pressed %s." % "+".join(parts)
+        except Exception as e:
+            return "Hotkey failed. %s" % e
+    if op == "press":
+        k = KEY_ALIASES.get(str(key or "").strip().lower(), str(key or "").strip().lower())
+        return press_key(k, times=times)
+    return "Unknown keyboard operation %s." % op
+
+
+def clipboard_action(text):
+    try:
+        proc = subprocess.Popen(["clip"], stdin=subprocess.PIPE,
+                                shell=True, creationflags=0)
+        proc.communicate(str(text or "").encode("utf-16-le") if os.name == "nt"
+                         else str(text or "").encode())
+        return "Copied to the clipboard."
+    except Exception as e:
+        return "Clipboard failed. %s" % e
+
+
+# --------------------------------------------------------------------------
+# guarded shell
+# --------------------------------------------------------------------------
+
+DANGEROUS = (
+    "format ", "del /", "del *", "rmdir /s", "rd /s", "rm -rf", "shutdown",
+    "diskpart", "cipher /w", "taskkill /f /im system", "reg delete",
+    "remove-item", "mkfs", "takeown", "bcdedit", "net user",
+)
+
+
+def run_command_safe(command):
+    cmd = str(command or "").strip()
+    if not cmd:
+        return "Give me a command to run."
+    low = cmd.lower()
+    if load_config().get("safe_mode", True) and any(d in low for d in DANGEROUS):
+        return ("That command looks destructive, so I am not running it. "
+                "Turn off safe mode in settings if you really want it.")
+    return run_command(cmd)
+
+
+# --------------------------------------------------------------------------
+# dispatcher
+# --------------------------------------------------------------------------
+
+def _dispatch(name, params):
+    """Execute one action and return a short spoken result (or None)."""
+
+    def s(key, default=""):
+        v = params.get(key, default)
+        return default if v is None else str(v)
+
+    def n(key, default=None):
+        return _num(params, key, default)
+
     try:
         if name == "open_app":
-            return open_app(str(arg))
+            return open_app(s("name") or s("arg"))
         if name == "search_web":
-            return search_web(str(arg), action.get("engine", "google"))
+            return search_web(s("query") or s("arg"), s("engine", "google"))
+        if name == "open_url":
+            return open_url(s("url") or s("arg"))
+        if name == "run_command":
+            return run_command_safe(s("command") or s("arg"))
         if name == "screenshot":
             return do_screenshot()
-        if name == "press_key":
-            return press_key(str(arg))
-        if name == "type_text":
-            return type_text(str(arg))
-        if name == "send_chat":
-            return send_chat(str(arg))
-        if name == "open_url":
-            return open_url(str(arg))
-        if name == "run_command":
-            return run_command(str(arg))
         if name == "mouse":
-            return mouse_action(str(action.get("action", "click")),
-                                action.get("x"), action.get("y"))
-        if name == "whatsapp_call":
-            return whatsapp_call(str(arg), video=bool(action.get("video")))
-        if name == "whatsapp_message":
-            return send_whatsapp_message(str(action.get("contact") or ""),
-                                         str(action.get("message") or ""))
+            op = s("op") or s("action", "click")
+            x, y = n("x"), n("y")
+            x2, y2 = n("x2"), n("y2")
+            dur = n("duration", 0.4)
+            clicks = int(n("clicks", 1) or 1)
+            if op == "position":
+                return mouse_now()
+            if op == "move":
+                if x is None or y is None:
+                    return "Give me x and y to move to."
+                ok = mouse_move_to(x, y, dur if dur is not None else 0.4)
+                return "Moved the mouse to %d,%d." % (x, y) if ok else "Move stopped."
+            if op == "drag":
+                if None in (x, y, x2, y2):
+                    return "A drag needs x, y, x2 and y2."
+                ok = mouse_follow([(x, y), (x2, y2)], duration=dur, button="left")
+                return "Dragged from %d,%d to %d,%d." % (x, y, x2, y2) if ok else "Drag stopped."
+            if op in ("click", "double_click", "right_click", "middle_click"):
+                pag = _pyautogui()
+                if x is not None and y is not None:
+                    if not mouse_move_to(x, y, dur if dur is not None else 0.4):
+                        return "Stopped."
+                button = {"click": "left", "double_click": "left",
+                          "right_click": "right", "middle_click": "middle"}[op]
+                if op == "double_click":
+                    pag.doubleClick()
+                else:
+                    pag.click(button=button, clicks=max(1, clicks))
+                where = " at %d,%d" % (x, y) if x is not None and y is not None else ""
+                return "Clicked%s." % where
+            if op == "scroll":
+                pag = _pyautogui()
+                amount = int(n("y", 0) or n("x", 0) or -300)
+                pag.scroll(amount)
+                return "Scrolled %d." % amount
+            return "Unknown mouse operation %s." % op
+        if name in ("draw", "picture"):
+            return draw_action(params)
+        if name == "model3d":
+            return model3d_action(params)
+        if name == "keyboard":
+            return keyboard_action(s("op"), text=s("text"), key=s("key"),
+                                   keys=params.get("keys"),
+                                   times=int(n("times", 1) or 1))
+        if name == "window":
+            return window_action(s("op"), title=s("title"),
+                                 x=n("x"), y=n("y"), w=n("w"), h=n("h"))
+        if name == "whatsapp":
+            op = s("op", "message")
+            if op == "call":
+                return whatsapp_call(s("contact"), video=False)
+            if op == "video_call":
+                return whatsapp_call(s("contact"), video=True)
+            return send_whatsapp_message(s("contact"), s("message"))
+        if name == "clipboard":
+            return clipboard_action(s("text"))
+        if name == "wait":
+            secs = max(0.0, min(10.0, float(n("seconds", 1) or 1)))
+            if _aborted():
+                return "Stopped."
+            time.sleep(secs)
+            return "Waited %.1f seconds." % secs
+        if name == "system_info":
+            return system_info()
+        if name == "say_aloud":
+            _speak_aloud(s("text") or s("arg"))
+            return "Speaking aloud: %s" % (s("text") or s("arg"))
+        # legacy action names kept for older prompt versions
+        if name == "press_key":
+            return press_key(s("arg") or s("key"), times=int(n("times", 1) or 1))
+        if name == "type_text":
+            return type_text(s("arg") or s("text"))
+        if name == "send_chat":
+            return send_chat(s("arg") or s("text"))
         if name == "active_window":
             info = get_active_window()
-            app = info.get("app") or "unknown"
-            title = info.get("title") or ""
-            return f"Active window is {app} (title: {title or '(none)'})."
+            return "Active window is %s (title: %s)." % (info.get("app") or "unknown",
+                                                         info.get("title") or "(none)")
         if name == "list_apps":
             return "Running apps: " + ", ".join(list_running_apps())
-        if name == "say_aloud":
-            _speak_aloud(str(arg))
-            return f"Speaking aloud: {arg}"
+        if name == "mouse_legacy":
+            return mouse_action(s("action", "click"), n("x"), n("y"))
     except Exception as e:
-        return f"Action failed. {e}"
+        return "Action failed. %s" % e
     return None
+
+def run_action(name, params=None):
+    """Run one action and record it in the audit log the UI shows."""
+    if isinstance(name, dict):          # legacy single-dict call style
+        params = {k: v for k, v in name.items() if k != "name"}
+        name = name.get("name")
+    params = params or {}
+    try:
+        out = _dispatch(name, params)
+    except Exception as e:              # pragma: no cover - safety net
+        out = "Action failed. %s" % e
+    log_action(name, params, out or "")
+    return out
+
+
+def _logged(name, params, result):
+    """Log actions triggered by the local (no-brain) command parser."""
+    log_action(name, params, result or "")
+    return result
 
 
 def load_contacts():
@@ -862,7 +1789,89 @@ def parse_command(text):
     t = text.strip().lower()
     t = re.sub(r"\b(jarvis|hey jarvis|ok jarvis|richie|hey richie|richie jarvis|ok richie jarvis)\b", "", t).strip(" ,.!?")
 
-    if re.search(r"^(?:listen(?:ing)? mode|call assis(?:tant|tance)|ear mode)(?:\s+(?:on|start|enable))?$", t):
+    # ---- emergency stop -------------------------------------------------
+    if re.search(r"^(?:stop|abort|halt|freeze|cancel|emergency)\b", t):
+        _state["abort"] = True
+        return "Stopped. I am not moving anything."
+
+    # ---- draw / model / mouse shortcuts (work with no brain connected) ---
+    m = re.match(r"^(?:draw|sketch|paint)\s+(?:me\s+)?(?:a|an|the)?\s*(.+)$", t)
+    if m and drawlib:
+        what = re.sub(r"\b(?:please|here|in\s+the\s+middle|centered?|centre|center)\b",
+                      "", m.group(1)).strip(" .!?")
+        for cand in (what, " ".join(what.split()[-2:]), what.split()[-1] if what.split() else ""):
+            cand = cand.strip()
+            if cand in drawlib.PICTURES:
+                return _logged("picture", {"name": cand}, draw_action({"picture": cand}))
+            if cand in drawlib.SHAPES:
+                return _logged("draw", {"shape": cand}, draw_action({"shape": cand}))
+
+    m = re.match(r"^(?:make|create|build|generate|model)\s+(?:me\s+)?(?:a|an|the)?\s*(.+?)(?:\s+model)?$", t)
+    if m and m3d:
+        what = m.group(1).strip()
+        for cand in (what, " ".join(what.split()[-2:]), what.split()[-1] if what.split() else ""):
+            cand = re.sub(r"^3d\s+", "", cand).strip()
+            if cand in m3d.MODELS:
+                return _logged("model3d", {"kind": cand}, model3d_action({"kind": cand}))
+
+    m = re.match(r"^(?:move|put|slide)\s+(?:the\s+)?(?:mouse|cursor|pointer)\s+to\s+(\d+)\s*[, ]\s*(\d+)$", t)
+    if m:
+        x, y = int(m.group(1)), int(m.group(2))
+        try:
+            out = "Moved the mouse to %d,%d." % (x, y) if mouse_move_to(x, y, 0.5) else "Stopped."
+        except Exception:
+            out = "I cannot move the mouse. Run setup.bat to install pyautogui."
+        return _logged("mouse", {"op": "move", "x": x, "y": y}, out)
+
+    if re.match(r"^(?:move|put)\s+(?:the\s+)?(?:mouse|cursor|pointer)\s+to\s+the\s+(?:centre|center|middle)$", t):
+        w, h = _screen_size()
+        try:
+            out = "Moved the mouse to the middle." if mouse_move_to(w // 2, h // 2, 0.5) else "Stopped."
+        except Exception:
+            out = "I cannot move the mouse. Run setup.bat to install pyautogui."
+        return _logged("mouse", {"op": "move", "x": w // 2, "y": h // 2}, out)
+
+    if re.search(r"^where(?:\s+i)?s?\s+(?:the\s+)?(?:mouse|cursor|pointer)\b", t):
+        return mouse_now()
+
+    m = re.match(r"^(?:(double|right|middle)\s+)?click(?:\s+at\s+(\d+)\s*[, ]\s*(\d+))?$", t)
+    if m:
+        kind, xs, ys = m.group(1), m.group(2), m.group(3)
+        pos = (int(xs), int(ys)) if xs and ys else None
+        try:
+            pag = _pyautogui()
+            if pos and not mouse_move_to(pos[0], pos[1], 0.35):
+                return "Stopped."
+            if kind == "double":
+                pag.doubleClick()
+            elif kind == "right":
+                pag.rightClick()
+            elif kind == "middle":
+                pag.middleClick()
+            else:
+                pag.click()
+            out = "Clicked%s." % (" at %d,%d" % pos if pos else "")
+        except Exception:
+            out = "I cannot click. Run setup.bat to install pyautogui."
+        return _logged("mouse", {"op": (kind or "click"), "x": pos[0] if pos else None,
+                                 "y": pos[1] if pos else None}, out)
+
+    m = re.match(r"^(?:set\s+)?(?:mouse\s+)?speed\s+(slow|normal|fast|turbo)$", t)
+    if m:
+        value = {"slow": 0.5, "normal": 1.0, "fast": 1.8, "turbo": 3.0}[m.group(1)]
+        cfg = load_config()
+        cfg["speed"] = value
+        save_config(cfg)
+        return "Mouse speed set to %s." % m.group(1)
+
+    if re.search(r"^(?:list|what are)\s+(?:the\s+)?(?:free\s+)?models\b", t):
+        try:
+            free = fetch_free_models(load_config(), force=True)[:12]
+            return "Free models right now: " + ", ".join(m["id"] for m in free)
+        except Exception as e:
+            return "I could not reach the model list. %s" % e
+
+    if re.search(r"^(listen(?:ing)? mode|call assis(?:tant|tance)|ear mode)(?:\s+(?:on|start|enable))?$", t):
         if not os.path.isdir(STT_MODEL_DIR):
             return "My speech brain is missing. Run setup.bat again."
         _state["listen"] = True
@@ -984,9 +1993,11 @@ def parse_command(text):
 
     if re.match(r"^(hi|hello|hey|who are you|what can you do|help)\b", t):
         return ("Hello sir. I am Richie Jarvis, running locally on your machine. "
-                "Try: open notepad, search youtube lofi beats, screenshot, volume up, "
-                "send chat hello there, open url google.com, run command dir, "
-                "or call a number on whatsapp.")
+                "I can drive the mouse: say draw a circle, draw a cat, make a robot "
+                "for a 3D model, move the mouse to 900 500, or click at 300 300. "
+                "I also do open notepad, search youtube lofi beats, screenshot, "
+                "volume up, open url google.com, run command dir, "
+                "and call someone on whatsapp. Say stop at any time.")
 
     sent = handle_send_whatsapp(text)
     if sent is not None:
@@ -1002,9 +2013,80 @@ def parse_command(text):
     return None
 
 
+def fetch_free_models(cfg, force=False):
+    """Free models offered by the current provider, best first.
+
+    Ranked so tool-capable models with the largest context come first, which
+    is exactly what a PC-controlling assistant wants. Cached for 15 minutes.
+    """
+    cached = _state.get("free_models")
+    stamp = float(_state.get("free_models_at", 0) or 0)
+    if cached and not force and (time.time() - stamp) < 900:
+        return cached
+    if not cfg.get("api_key"):
+        raise RuntimeError("no API key saved yet")
+    provider = cfg.get("provider", "openrouter")
+    url = cfg_base_url(cfg).rstrip("/") + "/models"
+    data = _http_json(url, None, cfg, _brain_headers(cfg), timeout=25)
+    items = data.get("data") or []
+    out = []
+    for m in items:
+        mid = str(m.get("id") or "").strip()
+        if not mid:
+            continue
+        pricing = m.get("pricing") or {}
+        try:
+            cost = float(pricing.get("prompt") or 0)
+        except (TypeError, ValueError):
+            cost = 0.0
+        free = mid.endswith(":free") or cost == 0.0
+        if provider == "zen" and not free:
+            free = ("free" in mid.lower()) or mid == "big-pickle"
+        if not free:
+            continue
+        sup = m.get("supported_parameters") or []
+        out.append({
+            "id": mid,
+            "name": str(m.get("name") or mid),
+            "context": int(m.get("context_length") or 0),
+            "tools": bool(("tools" in sup) or provider != "openrouter"),
+        })
+    out.sort(key=lambda x: (not x["tools"], -x["context"]))
+    _state["free_models"] = out
+    _state["free_models_at"] = time.time()
+    return out
+
+
+def verify_key(cfg):
+    """Tiny round trip to prove the key/model actually work."""
+    msg, err = _call_brain(
+        [{"role": "user", "content": "Reply with the single word: ready"}],
+        cfg, max_tokens=16, temperature=0.1)
+    if msg is None:
+        return {"ok": False, "message": err or "unknown error"}
+    return {"ok": True,
+            "message": (msg.get("content") or "").strip()[:120] or "ready",
+            "model": _state.get("last_model", "")}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print("[richie]", fmt % args)
+
+    # ---- helpers --------------------------------------------------------
+    def _cors(self):
+        """Only allow pages served from this machine.
+
+        A wildcard here would let any website you visit drive the mouse and
+        run shell commands through localhost:8765.
+        """
+        origin = self.headers.get("Origin") or ""
+        if re.match(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$", origin) or \
+           origin.endswith(".e2b.app") or origin.endswith(".arena.ai"):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
     def _send(self, code, data, ctype="application/json"):
         if isinstance(data, dict):
@@ -1015,55 +2097,148 @@ class Handler(BaseHTTPRequestHandler):
             body = str(data).encode()
         self.send_response(code)
         self.send_header("Content-Type", f"{ctype}; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store")
+        self._cors()
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _body(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            return json.loads(self.rfile.read(length) or b"{}")
+        except Exception:
+            return {}
+
+    # ---- GET ------------------------------------------------------------
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
         if path in ("/", "/index.html"):
             with open(os.path.join(BASE_DIR, "index.html"), "rb") as f:
                 self._send(200, f.read(), "text/html")
-        elif path == "/health":
+            return
+        if path == "/health":
             cfg = load_config()
-            self._send(200, {"status": "ok", "time": datetime.now().isoformat(timespec="seconds"),
-                             "brain": bool(cfg.get("api_key")), "model": cfg.get("model", "")})
-        elif path == "/config":
+            w, h = _screen_size()
+            self._send(200, {"status": "ok", "version": VERSION,
+                             "time": datetime.now().isoformat(timespec="seconds"),
+                             "brain": bool(cfg.get("api_key")),
+                             "provider": cfg.get("provider", ""),
+                             "model": cfg_model(cfg),
+                             "last_model": _state.get("last_model", ""),
+                             "screen": [w, h],
+                             "tools": bool(_state.get("tools_ok", True))})
+            return
+        if path == "/config":
             cfg = load_config()
             key = cfg.get("api_key", "")
             masked = (key[:6] + "..." + key[-4:]) if len(key) > 12 else ("set" if key else "")
+            models = []
+            try:
+                models = fetch_free_models(cfg)[:40]
+            except Exception:
+                models = []
             self._send(200, {"has_key": bool(key), "key_masked": masked,
-                             "model": cfg.get("model", ""), "base_url": cfg.get("base_url", "")})
-        else:
-            self._send(404, {"error": "not found"})
+                             "provider": cfg.get("provider", "openrouter"),
+                             "base_url": cfg.get("base_url", ""),
+                             "model": cfg.get("model", ""),
+                             "model_default": cfg_model(cfg),
+                             "fallbacks": cfg.get("fallbacks", []),
+                             "models": models,
+                             "safe_mode": bool(cfg.get("safe_mode", True)),
+                             "failsafe": bool(cfg.get("failsafe", True)),
+                             "speed": cfg.get("speed", 1.0),
+                             "max_actions": cfg.get("max_actions", 6)})
+            return
+        if path == "/models":
+            cfg = load_config()
+            try:
+                models = fetch_free_models(cfg, force="refresh" in self.path)
+                self._send(200, {"models": models, "count": len(models)})
+            except Exception as e:
+                self._send(200, {"models": [], "count": 0, "error": str(e)})
+            return
+        if path == "/artifact":
+            self._send(200, {"artifact": _state.get("last_artifact")})
+            return
+        if path == "/actions":
+            with _ACTION_LOG_LOCK:
+                self._send(200, {"actions": list(_ACTION_LOG[-25:])})
+            return
+        self._send(404, {"error": "not found"})
 
+    # ---- POST -----------------------------------------------------------
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
-        length = int(self.headers.get("Content-Length", 0))
-        try:
-            payload = json.loads(self.rfile.read(length) or b"{}")
-        except Exception:
-            payload = {}
+        payload = self._body()
+
         if path == "/config":
             cfg = load_config()
-            new_key = (payload.get("api_key") or "").strip()
-            if new_key:
-                cfg["api_key"] = new_key
-            if payload.get("model", "").strip():
-                cfg["model"] = payload["model"].strip()
-            if payload.get("base_url", "").strip():
-                cfg["base_url"] = payload["base_url"].strip()
+            for key in ("provider", "model", "base_url", "api_key"):
+                val = payload.get(key, None)
+                if isinstance(val, str):
+                    cfg[key] = val.strip()
+            if isinstance(payload.get("fallbacks"), list):
+                cfg["fallbacks"] = [str(x).strip() for x in payload["fallbacks"] if str(x).strip()]
+            for key in ("safe_mode", "failsafe", "listen", "secretary"):
+                if key in payload and isinstance(payload[key], bool):
+                    cfg[key] = payload[key]
+            for key in ("speed", "max_actions"):
+                if key in payload:
+                    try:
+                        cfg[key] = float(payload[key]) if key == "speed" else int(payload[key])
+                    except (TypeError, ValueError):
+                        pass
             save_config(cfg)
-            self._send(200, {"saved": True, "has_key": bool(cfg.get("api_key")), "model": cfg["model"]})
+            _state["tools_ok"] = True          # new model may support tools
+            _state["free_models"] = None       # provider may have changed
+            try:
+                fetch_free_models(cfg, force=True)
+            except Exception:
+                pass
+            self._send(200, {"saved": True, "has_key": bool(cfg.get("api_key")),
+                             "model": cfg_model(cfg), "provider": cfg.get("provider", "")})
             return
+
+        if path == "/test":
+            cfg = load_config()
+            if not cfg.get("api_key"):
+                self._send(200, {"ok": False, "message": "no API key saved yet"})
+                return
+            self._send(200, verify_key(cfg))
+            return
+
+        if path == "/abort":
+            _state["abort"] = True
+            released = False
+            try:
+                pag = _pyautogui()
+                for button in ("left", "right", "middle"):
+                    try:
+                        pag.mouseUp(button=button)
+                    except Exception:
+                        pass
+                released = True
+            except Exception:
+                pass
+            print("[jarvis] ABORT - stopped everything")
+            self._send(200, {"stopped": True, "released_mouse": released})
+            return
+
         if path == "/chat":
             session = str(payload.get("session") or "default")[:64]
             text = (payload.get("text") or "").strip()
             if not text:
                 self._send(200, {"reply": "Say something to chat."})
                 return
-            # commands typed in the chat box still run (open apps, whatsapp, etc.)
+            _state["abort"] = False
+            _state["pending_artifact"] = None
             try:
                 cmd = parse_command(text)
             except Exception as e:
@@ -1071,31 +2246,37 @@ class Handler(BaseHTTPRequestHandler):
                 print("[jarvis] chat command parse error:", e)
             if cmd is not None:
                 print(f"[jarvis] chat-command({session}): {text!r} -> {cmd!r}")
-                self._send(200, {"reply": cmd})
+                self._send(200, {"reply": cmd, "artifact": _state.get("pending_artifact")})
                 return
             reply = chat_reply(session, text)
             print(f"[jarvis] chat({session}): {text!r} -> {reply!r}")
             self._send(200, {"reply": reply})
             return
+
         if path != "/command":
             self._send(404, {"error": "not found"})
             return
+
         text = (payload.get("text") or "").strip()
         if not text:
             self._send(200, {"speak": "Say that again?"})
             return
         _state["last_text"] = text.lower()
+        _state["abort"] = False
+        _state["pending_artifact"] = None
         reply = parse_command(text)
         if reply is None:
             cfg = load_config()
             if cfg.get("api_key"):
-                print("[jarvis] asking the Zen brain...")
+                print("[jarvis] asking the brain (%s)..." % cfg_model(cfg))
                 reply = llm_reply(text)
             if not reply:
                 reply = ("I don't know how to do that yet. Connect my brain in settings, "
                          "or say help to hear what I can do.")
         print(f"[jarvis] heard: {text!r} -> {reply!r}")
-        self._send(200, {"speak": reply})
+        self._send(200, {"speak": reply,
+                         "artifact": _state.get("pending_artifact"),
+                         "model": _state.get("last_model", "")})
 
 
 class JarvisServer(ThreadingHTTPServer):
@@ -1104,14 +2285,20 @@ class JarvisServer(ThreadingHTTPServer):
 
 
 def main():
+    cfg = load_config()
     try:
-        server = JarvisServer(("127.0.0.1", PORT), Handler)
+        server = JarvisServer((HOST, PORT), Handler)
     except OSError:
         print(f"! ERROR: port {PORT} is already in use.")
         print("! Close the other Richie Jarvis window (or run: taskkill /f /im python.exe) and try again.")
         return
-    print(f"* Richie Jarvis online -> http://localhost:{PORT}")
+    print(f"* Richie Jarvis {VERSION} online -> http://localhost:{PORT}")
     print("* Open that address in Chrome/Edge, allow the microphone, and speak after saying 'Richie Jarvis'.")
+    print("* Provider: %s | model: %s | brain: %s"
+          % (cfg.get("provider", "openrouter"), cfg_model(cfg),
+             "connected" if cfg.get("api_key") else "NOT CONNECTED (open the gear icon)"))
+    if HOST not in ("127.0.0.1", "localhost"):
+        print(f"* WARNING: listening on {HOST} - anything on your network can drive this PC.")
     if load_config().get("secretary"):
         _state["secretary"] = True
     if load_config().get("listen"):
