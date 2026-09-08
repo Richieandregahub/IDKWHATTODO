@@ -1,0 +1,13 @@
+# --- secrets: never commit these ---
+config.local.json
+contacts.local.json
+
+# --- runtime output ---
+*.log
+models/
+tools/out/
+__pycache__/
+*.pyc
+
+# --- speech model (huge; setup.bat downloads it) ---
+vosk-model*/

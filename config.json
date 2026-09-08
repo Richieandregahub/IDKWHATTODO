@@ -1,11 +1,20 @@
 {
-  "api_key": "sk-hnynfzTKYKCOc77HbdigSWHBMwoWqEymZeo49USptzjSRroqh50msrMQ9WyXYYI6",
-  "base_url": "https://opencode.ai/zen/v1",
-  "model": "ling-3.0-flash-fin-free",
+  "provider": "openrouter",
+  "base_url": "",
+  "model": "",
+  "fallbacks": [],
   "listen": true,
   "secretary": true,
+  "listen_threshold": 350,
   "answer_pos": [
     0,
     0
-  ]
+  ],
+  "safe_mode": true,
+  "failsafe": true,
+  "speed": 1.0,
+  "max_actions": 6,
+  "voice_device": "",
+  "auto_converse": true,
+  "chat_poll": 6.0
 }

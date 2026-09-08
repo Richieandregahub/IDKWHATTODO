@@ -1,0 +1,9 @@
+# Richie Jarvis - desktop control dependencies
+#   pip install -r requirements.txt
+pyautogui>=0.9.54
+psutil>=5.9.8
+
+# Optional, Windows only: "listen mode" lets Jarvis hear what your PC plays
+# (so it can answer for you during a call) and "secretary mode" auto-answers.
+pyaudiowpatch ; sys_platform == "win32"
+vosk ; sys_platform == "win32"
