@@ -238,6 +238,24 @@
     border:1px solid var(--line);color:var(--body);margin-left:6px;text-transform:uppercase}
   .pill.free{color:#6fffe0;border-color:rgba(111,255,224,.5)}
 
+  /* ---------- per-provider bits in the settings card ---------- */
+  .providerbox{border:1px solid var(--line);border-radius:10px;padding:10px 12px;
+    margin-bottom:14px;background:rgba(111,255,224,.04)}
+  .providerbox[hidden]{display:none}
+  .providerbox .hint{margin-bottom:10px}
+  .providerbox .mrow{align-items:center;margin-top:0}
+  .providerbox .pill{margin-left:0;flex:1;text-align:center}
+  .pill.good{color:#39e08c;border-color:rgba(57,224,140,.55)}
+  .pill.bad{color:#ffb3b3;border-color:rgba(255,120,120,.55)}
+  .mini.wide{width:auto;flex:0 0 auto;padding:0 12px;height:30px;font:inherit;
+    font-size:9.5px;letter-spacing:.14em;font-weight:700}
+  .keylink{display:inline-block;margin-top:6px;font-size:10px;letter-spacing:.06em;
+    color:var(--body);text-decoration:none;text-transform:none}
+  .keylink:hover{color:var(--bright)}
+  #keyRow[hidden]{display:none}
+  /* author-level display rules beat the UA [hidden] rule, so say it again */
+  #modalcard [hidden]{display:none !important}
+
   /* ---------- live conversation panel ---------- */
   #livefab{position:fixed;right:clamp(12px,2.4vw,26px);bottom:88px;z-index:31;
     width:54px;height:54px;border-radius:50%;border:1px solid var(--line);
@@ -437,18 +455,34 @@
 <div id="modal" hidden>
   <div id="modalcard">
     <h2>AI brain — free models</h2>
-    <p class="hint">Pick a provider, paste a key, then choose one of the models that is
-      free right now. Keys are stored in <b>config.local.json</b> on your PC only.</p>
+    <p class="hint">Pick a provider. <b>Puter.js</b> is free with no key at all,
+      <b>Gemini</b> takes a free Google AI Studio key, <b>OpenRouter</b> has dozens of
+      <code>:free</code> models. Keys are stored in <b>config.local.json</b> on your PC only.</p>
 
     <label>Provider
       <select id="inProvider">
+        <option value="puter">Puter.js — free, no key</option>
+        <option value="gemini">Google Gemini — free API key</option>
         <option value="openrouter">OpenRouter — free models</option>
-        <option value="zen">OpenCode Zen</option>
         <option value="custom">Custom (OpenAI-compatible)</option>
       </select>
     </label>
 
-    <label>API key<input id="inKey" type="password" placeholder="sk-or-v1-… or your Zen key" autocomplete="off"></label>
+    <div id="puterBox" class="providerbox" hidden>
+      <p class="hint">Puter.js runs <b>in this browser tab</b> — that is what makes it free:
+        no API key, no bill, Puter's "user pays" model covers it. Keep this tab open while
+        Jarvis thinks. First use pops up a free Puter sign-in.</p>
+      <div class="mrow">
+        <span id="puterState" class="pill">relay: checking…</span>
+        <button id="puterConnect" class="mini wide" title="Sign in to Puter and start the relay">CONNECT PUTER</button>
+      </div>
+    </div>
+
+    <label id="keyRow">
+      <span id="keyLabel">API key</span>
+      <input id="inKey" type="password" placeholder="paste your key" autocomplete="off">
+      <a id="keyLink" class="keylink" href="#" target="_blank" rel="noopener">where do I get one? ↗</a>
+    </label>
 
     <label>Model
       <div class="mrow">
@@ -800,8 +834,14 @@ async function healthCheck(){
     $('dot').classList.toggle('on', r.ok);
     if(!r.ok){ $('statustext').textContent='local core error'; return; }
     const model = d.last_model || d.model || '';
+    if(d.provider && d.provider !== savedProvider && $('modal').hidden){
+      savedProvider = d.provider;
+      // the core decides which brain is wired up; keep this tab in step
+      if(d.provider === 'puter') ensurePuter(); else stopRelay();
+    }
     $('statustext').textContent = d.brain
-      ? ('core + brain online · ' + (d.provider||'') + (model ? ' · '+model : ''))
+      ? ('core + brain online · ' + (d.provider||'') + (model ? ' · '+model : '')
+         + (d.provider === 'puter' && d.puter === false ? ' · relay starting…' : ''))
       : 'core online · no brain key (click the gear)';
     // show what the AI last did to the machine - it is controlling the mouse
     try{
@@ -844,12 +884,237 @@ async function emergencyStop(){
 }
 $('stopbtn').addEventListener('click',emergencyStop);
 
+/* ---------- provider metadata (mirrors PROVIDERS in server.py) ---------- */
+const PROVIDERS = {
+  puter:{ label:'Puter.js', needsKey:false, keyLabel:'',
+          keyHint:'no key needed — this browser tab is the brain',
+          keyUrl:'https://developer.puter.com/' },
+  gemini:{ label:'Google Gemini', needsKey:true, keyLabel:'Gemini API key',
+           keyHint:'AIza… from aistudio.google.com/apikey',
+           keyUrl:'https://aistudio.google.com/apikey' },
+  openrouter:{ label:'OpenRouter', needsKey:true, keyLabel:'OpenRouter API key',
+               keyHint:'sk-or-v1-… from openrouter.ai/keys',
+               keyUrl:'https://openrouter.ai/keys' },
+  custom:{ label:'Custom endpoint', needsKey:true, keyLabel:'API key',
+           keyHint:'whatever your endpoint expects', keyUrl:'' }
+};
+/* same default the core uses (DEFAULT_PROVIDER in server.py) */
+const DEFAULT_PROVIDER = 'puter';
+const providerMeta = p => PROVIDERS[p] || PROVIDERS[DEFAULT_PROVIDER];
+let savedProvider = DEFAULT_PROVIDER;
+
+function applyProviderUI(provider, meta){
+  provider = provider || DEFAULT_PROVIDER;
+  meta = meta || providerMeta(provider);
+  const needsKey = meta.needsKey !== false;
+  $('inProvider').value = provider;
+  $('puterBox').hidden = provider !== 'puter';
+  $('keyRow').hidden = !needsKey;
+  if(needsKey){
+    $('keyLabel').textContent = meta.keyLabel || 'API key';
+    $('inKey').placeholder = meta.keyHint || 'paste your key';
+    const link = $('keyLink');
+    if(meta.keyUrl){ link.href = meta.keyUrl; link.hidden = false; }
+    else { link.hidden = true; }
+  }
+  $('inBase').closest('label').hidden = (provider === 'puter');
+  if(provider === 'puter') ensurePuter(); else stopRelay();
+}
+$('inProvider').addEventListener('change', ()=>{
+  const p = $('inProvider').value;
+  applyProviderUI(p);
+  $('keyState').textContent = (p === 'puter')
+    ? 'free · no key · this tab does the thinking'
+    : (p === savedProvider ? currentKeyState : 'paste a key, then SAVE');
+  loadModels(true, p);
+});
+
+/* ============================================================
+   3b. Puter.js relay — the free, keyless brain.
+   puter.js only lives in the browser, so this tab answers the
+   jobs the Python core queues on /puter/jobs and posts the
+   model's reply back. Everything else (tools, actions, chat)
+   still runs in server.py.
+   ============================================================ */
+let puterScriptPromise = null;
+let relayOn = false, relayRunning = false, puterOK = false;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function loadPuterScript(){
+  if(window.puter && window.puter.ai) return Promise.resolve(true);
+  if(puterScriptPromise) return puterScriptPromise;
+  puterScriptPromise = new Promise(resolve=>{
+    const s = document.createElement('script');
+    s.src = 'https://js.puter.com/v2/';
+    s.async = true;
+    s.onload = ()=> resolve(!!(window.puter && window.puter.ai));
+    s.onerror = ()=>{ puterScriptPromise = null; resolve(false); };
+    document.head.appendChild(s);
+    setTimeout(()=> resolve(!!(window.puter && window.puter.ai)), 20000);
+  });
+  return puterScriptPromise;
+}
+
+function setPuterState(text, kind){
+  const el = $('puterState');
+  if(!el) return;
+  el.textContent = text;
+  el.className = 'pill' + (kind ? ' ' + kind : '');
+}
+
+async function ensurePuter(){
+  if(relayOn && puterOK) return true;
+  setPuterState('relay: loading puter.js…', '');
+  const ok = await loadPuterScript();
+  if(!ok){
+    puterOK = false;
+    puterScriptPromise = null;   // let a later attempt retry the CDN
+    setPuterState('puter.js blocked — check your connection / ad blocker', 'bad');
+    return false;
+  }
+  puterOK = true;
+  try{ puter.ai.normalize = true; }catch(e){}   // OpenAI-shaped replies for every vendor
+  startRelay();
+  pushPuterModels();
+  return true;
+}
+
+function startRelay(){
+  relayOn = true;
+  setPuterState('relay: online · free brain ready', 'good');
+  relayLoop();
+}
+function stopRelay(){
+  relayOn = false;
+}
+
+async function relayLoop(){
+  if(relayRunning) return;
+  relayRunning = true;
+  while(relayOn){
+    let job = null, started = Date.now();
+    try{
+      const d = await (await fetch('/puter/jobs?wait=20')).json();
+      job = d && d.job;
+    }catch(e){
+      // core offline (or the page was opened straight from disk)
+      if(Date.now() - started < 1000) await sleep(2500);
+      continue;
+    }
+    if(job){ try{ await runPuterJob(job); }catch(e){} }
+    else if(Date.now() - started < 1000) await sleep(400);
+  }
+  relayRunning = false;
+}
+
+/* puter.ai.chat() answers differ slightly per vendor - normalise them all
+   into the OpenAI message shape server.py already understands. */
+function puterMessage(resp){
+  if(resp == null) return { role:'assistant', content:'' };
+  if(typeof resp === 'string') return { role:'assistant', content:resp };
+  const m = resp.message || resp;
+  let content = m.content;
+  if(Array.isArray(content)){
+    content = content.map(b => typeof b === 'string' ? b
+              : (b && (b.text || b.content) || '')).join('');
+  } else if(content && typeof content === 'object'){
+    content = content.text || '';
+  }
+  const out = { role:'assistant', content: typeof content === 'string' ? content : '' };
+  const calls = m.tool_calls || m.toolCalls;
+  if(Array.isArray(calls) && calls.length){
+    out.tool_calls = calls.map(tc=>{
+      const fn = tc.function || tc;
+      let args = fn.arguments != null ? fn.arguments : (fn.args || {});
+      if(typeof args !== 'string') { try{ args = JSON.stringify(args); }catch(e){ args = '{}'; } }
+      return { id: tc.id || '', type:'function',
+               function:{ name: fn.name || '', arguments: args } };
+    });
+  }
+  return out;
+}
+
+async function runPuterJob(job){
+  const models = (job.models && job.models.length) ? job.models : ['gpt-5-nano'];
+  let lastErr = '';
+  for(const model of models){
+    try{
+      const opts = { model, normalize:true };
+      if(typeof job.temperature === 'number') opts.temperature = job.temperature;
+      if(job.max_tokens) opts.max_tokens = Math.max(job.max_tokens, 1024);
+      if(job.tools && job.tools.length) opts.tools = job.tools;
+      const msg = puterMessage(await puter.ai.chat(job.messages || [], opts));
+      if(!msg.content && !(msg.tool_calls || []).length){
+        lastErr = model + ' returned an empty reply';
+        continue;
+      }
+      await postPuterResult(job.id, { ok:true, message:msg, model });
+      try{ log('jarvis','puter.js','brain · '+model); }catch(e){}
+      return;
+    }catch(err){
+      lastErr = String((err && (err.message || err.error || err.reason)) || err || 'failed');
+      // signing in fixes this for every model, so do not burn through the list
+      if(/sign ?in|signed out|auth|unauthor|permission|payment/i.test(lastErr)) break;
+    }
+  }
+  await postPuterResult(job.id, { ok:false, error:lastErr || 'puter.ai.chat failed' });
+}
+
+async function postPuterResult(id, body){
+  body.id = id;
+  try{
+    await fetch('/puter/result', { method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+  }catch(e){}
+}
+
+/* Hand Puter's live model list to the core so the dropdown is real. */
+async function pushPuterModels(){
+  if(!puterOK) return;
+  try{
+    const raw = await puter.ai.listModels();
+    const models = (raw || []).map(m=>{
+      if(typeof m === 'string') return { id:m };
+      return { id: m.id || m.key || m.model || '',
+               name: m.name || m.description || '',
+               max_input_tokens: m.max_input_tokens || m.context_length || 0 };
+    }).filter(m=>m.id);
+    let signed = null;
+    try{ signed = !!(puter.auth && await puter.auth.isSignedIn()); }catch(e){}
+    await fetch('/puter/models', { method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ models, signed_in:signed }) });
+  }catch(e){}
+}
+
+async function connectPuter(){
+  setPuterState('relay: starting…', '');
+  const ok = await ensurePuter();
+  if(!ok) return;
+  try{
+    if(puter.auth && !(await puter.auth.isSignedIn())){
+      setPuterState('waiting for Puter sign-in (free)…', '');
+      await puter.auth.signIn();
+    }
+    setPuterState('relay: online · signed in · free brain ready', 'good');
+  }catch(e){
+    setPuterState('sign-in skipped — the relay is up, Puter may ask again', 'bad');
+  }
+  pushPuterModels();
+  loadModels(true, 'puter');
+}
+$('puterConnect').addEventListener('click', connectPuter);
+
 /* ---------- free model list ---------- */
-async function loadModels(force){
+async function loadModels(force, provider){
   const sel=$('inModelSel');
   sel.innerHTML='<option value="">loading free models…</option>';
+  const want = provider || $('inProvider').value;
+  let qs = [];
+  if(force) qs.push('refresh=1');
+  if(want && want !== savedProvider) qs.push('provider='+encodeURIComponent(want));
   try{
-    const d=await (await fetch('/models'+(force?'?refresh=1':''))).json();
+    const d=await (await fetch('/models'+(qs.length?'?'+qs.join('&'):''))).json();
     const models=d.models||[];
     if(!models.length){
       sel.innerHTML='<option value="">'+(d.error?('no models: '+d.error):'none found — add a key first')+'</option>';
@@ -859,7 +1124,8 @@ async function loadModels(force){
     models.slice(0,60).forEach(m=>{
       const o=document.createElement('option');
       o.value=m.id;
-      o.textContent=m.id+(m.tools?'':' (no tools)')+(m.context?(' · '+Math.round(m.context/1000)+'k'):'');
+      o.textContent=m.id+(m.tools?'':' (no tools)')+(m.free===false?' (paid)':'')
+                   +(m.context?(' · '+Math.round(m.context/1000)+'k'):'');
       sel.appendChild(o);
     });
     return models;
@@ -869,23 +1135,48 @@ async function loadModels(force){
   }
 }
 
+let currentKeyState = '';
 async function openSettings(){
   let c={};
   try{
     c=await (await fetch('/config')).json();
-    $('inProvider').value=c.provider||'openrouter';
+    savedProvider = c.provider || 'puter';
+    const meta = Object.assign({}, providerMeta(savedProvider), {
+      keyLabel:c.key_label, keyHint:c.key_hint, keyUrl:c.key_url,
+      needsKey:c.needs_key !== false
+    });
+    applyProviderUI(savedProvider, meta);
     $('inModel').value=c.model||'';
     $('inBase').value=c.base_url||'';
     $('inSafe').checked = c.safe_mode!==false;
     $('inFailsafe').checked = c.failsafe!==false;
-    $('keyState').textContent=c.has_key?('key saved: '+c.key_masked):'no key configured yet';
-  }catch(e){ $('keyState').textContent='local core offline — start_jarvis.bat first'; }
+    currentKeyState = (c.needs_key===false)
+      ? 'free · no key needed · Puter.js runs in this tab'
+      : (c.has_key?('key saved: '+c.key_masked):'no key configured yet');
+    $('keyState').textContent = currentKeyState;
+    if(c.puter) paintPuterStatus(c.puter);
+  }catch(e){
+    $('keyState').textContent='local core offline — start_jarvis.bat first';
+    applyProviderUI($('inProvider').value || DEFAULT_PROVIDER);
+  }
   $('modal').hidden=false;
   const models=(c.models&&c.models.length)?c.models:await loadModels(false);
   const want=c.model||c.model_default||'';
   if(want) $('inModelSel').value=want;
   if(models.length && !$('inModelSel').value) $('inModel').value=models[0].id;
-  $('inKey').focus();
+  if(savedProvider === 'puter') setPuterState(
+    ($('puterState').textContent || 'relay: online'), '');
+  else $('inKey').focus();
+}
+
+function paintPuterStatus(st){
+  if(!st) return;
+  if(st.relay){
+    setPuterState('relay: online' + (st.models?(' · '+st.models+' free models'):'')
+                  + (st.signed_in===false ? ' · sign in for more' : ''), 'good');
+  }else{
+    setPuterState('relay: offline — click CONNECT PUTER', 'bad');
+  }
 }
 $('gear').addEventListener('click',openSettings);
 $('closeCfg').addEventListener('click',()=>{ $('modal').hidden=true; });
@@ -894,24 +1185,36 @@ $('inModelSel').addEventListener('change',()=>{
   if($('inModelSel').value) $('inModel').value=$('inModelSel').value;
 });
 
+/* The key goes to the slot that belongs to the selected provider, so a
+   Gemini key and an OpenRouter key can both live in config.local.json. */
+function keyBody(){
+  const k = $('inKey').value.trim();
+  if(!k) return {};
+  return ($('inProvider').value === 'gemini') ? { gemini_api_key:k } : { api_key:k };
+}
+
 async function saveSettings(){
-  const body={
+  const body=Object.assign({
     provider:$('inProvider').value,
     model:$('inModel').value.trim(),
     base_url:$('inBase').value.trim(),
     safe_mode:$('inSafe').checked,
     failsafe:$('inFailsafe').checked
-  };
-  const k=$('inKey').value.trim();
-  if(k) body.api_key=k;
+  }, keyBody());
   try{
     const d=await (await fetch('/config',{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
     $('inKey').value='';
     if(d.saved){
-      $('keyState').textContent=d.has_key
+      savedProvider = d.provider || body.provider;
+      currentKeyState = (d.needs_key===false)
+        ? 'free · no key needed · Puter.js runs in this tab'
+        : (d.has_key ? ('key saved: '+d.key_masked) : 'still no key set');
+      $('keyState').textContent = d.brain
         ? ('brain connected · '+d.provider+(d.model?(' · '+d.model):''))
-        : 'still no key set';
+        : currentKeyState;
+      if(d.puter) paintPuterStatus(d.puter);
+      if(savedProvider === 'puter') ensurePuter();
       healthCheck(); blip(880,.1);
       setTimeout(()=>{ $('modal').hidden=true; },700);
     }
@@ -920,20 +1223,21 @@ async function saveSettings(){
 $('saveCfg').addEventListener('click',saveSettings);
 $('inKey').addEventListener('keydown',e=>{ if(e.key==='Enter') saveSettings(); });
 $('testCfg').addEventListener('click',async()=>{
-  $('keyState').textContent='testing the key…';
-  const k=$('inKey').value.trim();
+  const provider=$('inProvider').value;
+  $('keyState').textContent = provider==='puter'
+    ? 'testing the Puter.js relay…' : 'testing the key…';
+  const body = Object.assign({ provider, model:$('inModel').value.trim() }, keyBody());
   try{
-    if(k){
-      await fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({api_key:k,provider:$('inProvider').value,
-                             model:$('inModel').value.trim()})});
-      $('inKey').value='';
-    }
+    if(provider === 'puter') await ensurePuter();
+    await fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)});
+    $('inKey').value='';
     const d=await (await fetch('/test',{method:'POST',
       headers:{'Content-Type':'application/json'},body:'{}'})).json();
-    $('keyState').textContent = d.ok
-      ? ('working · '+(d.model||'')+(d.message?(' · said "'+d.message+'"'):''))
+    currentKeyState = d.ok
+      ? ('working · '+(d.model||provider)+(d.message?(' · said "'+d.message+'"'):''))
       : ('failed · '+(d.message||'unknown error'));
+    $('keyState').textContent = currentKeyState;
     blip(d.ok?880:200,.12);
   }catch(e){ $('keyState').textContent='test failed — is the local core running?'; }
 });

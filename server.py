@@ -109,20 +109,55 @@ PROVIDERS = {
         "base_url": "https://openrouter.ai/api/v1",
         "models_url": "https://openrouter.ai/api/v1/models",
         "model": "openrouter/free",
+        "key_label": "OpenRouter API key",
+        "key_hint": "sk-or-v1-… from openrouter.ai/keys",
+        "key_url": "https://openrouter.ai/keys",
+        "key_env": ("JARVIS_API_KEY", "OPENROUTER_API_KEY"),
+        "api": "openai",
     },
-    "zen": {
-        "label": "OpenCode Zen",
-        "base_url": "https://opencode.ai/zen/v1",
-        "models_url": "https://opencode.ai/zen/v1/models",
-        "model": "big-pickle",
+    "gemini": {
+        "label": "Google Gemini (free tier)",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "models_url": "https://generativelanguage.googleapis.com/v1beta/models",
+        "model": "gemini-2.5-flash",
+        "key_label": "Gemini API key",
+        "key_hint": "AIza… from aistudio.google.com/apikey",
+        "key_url": "https://aistudio.google.com/apikey",
+        "key_env": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+        "api": "gemini",
+    },
+    "puter": {
+        # Puter.js runs in the browser ("user pays" model): no key, no bill.
+        # The page acts as a relay, so the dashboard tab must stay open.
+        "label": "Puter.js — free, no key",
+        "base_url": "",
+        "models_url": "",
+        "model": "gpt-5-nano",
+        "key_label": "",
+        "key_hint": "no key needed — the browser talks to Puter.js for you",
+        "key_url": "https://developer.puter.com/",
+        "key_env": (),
+        "api": "puter",
     },
     "custom": {
         "label": "Custom (OpenAI-compatible)",
         "base_url": "",
         "models_url": "",
         "model": "",
+        "key_label": "API key",
+        "key_hint": "whatever your endpoint expects",
+        "key_url": "",
+        "key_env": ("JARVIS_API_KEY",),
+        "api": "openai",
     },
 }
+
+# Providers that were dropped but may still sit in somebody's config.json.
+# They are rewritten on load instead of silently breaking the brain.
+LEGACY_PROVIDERS = {"zen": "puter", "opencode": "puter"}
+
+# The out-of-the-box brain: free, keyless, and driven by the dashboard tab.
+DEFAULT_PROVIDER = "puter"
 
 # Used when the provider's live model list cannot be fetched. Free model IDs
 # rotate constantly, so the UI always prefers the live list (GET /models).
@@ -135,10 +170,24 @@ FALLBACK_MODELS = [
     "google/gemma-4-31b-it:free",
     "openai/gpt-oss-120b:free",
 ]
-ZEN_FALLBACKS = [
-    "big-pickle", "deepseek-v4-flash-free", "mimo-v2.5-free",
-    "nemotron-3-ultra-free", "qwen3.6-plus-free", "minimax-m3-free",
+# Gemini free tier is Flash-only these days (Pro needs billing), so the list
+# stays on Flash / Flash-Lite, which all support function calling.
+GEMINI_FALLBACKS = [
+    "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite", "gemini-2.0-flash",
 ]
+# Puter.js picks a vendor per model; these are the ones that are reliably free
+# and accept OpenAI-style `tools`.
+PUTER_FALLBACKS = [
+    "gpt-5-nano", "gpt-5.6-luna", "google/gemini-2.5-flash",
+    "meta-llama/llama-3.3-70b-instruct", "deepseek-chat",
+]
+FALLBACK_POOLS = {
+    "openrouter": FALLBACK_MODELS,
+    "gemini": GEMINI_FALLBACKS,
+    "puter": PUTER_FALLBACKS,
+    "custom": FALLBACK_MODELS,
+}
 
 CONTACTS_FILE = os.path.join(BASE_DIR, "contacts.json")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -146,11 +195,13 @@ CONFIG_LOCAL_FILE = os.path.join(BASE_DIR, "config.local.json")
 
 # Secrets live in config.local.json (git-ignored) so a key can never be
 # committed by accident. config.json only ever holds harmless settings.
-SECRET_KEYS = ("api_key",)
+# One slot per provider, so switching OpenRouter <-> Gemini keeps both keys.
+SECRET_KEYS = ("api_key", "gemini_api_key")
 
 DEFAULT_CONFIG = {
-    "provider": "openrouter",
+    "provider": DEFAULT_PROVIDER,
     "api_key": "",
+    "gemini_api_key": "",   # Google AI Studio key, used when provider == gemini
     "base_url": "",          # empty -> use the provider default
     "model": "",             # empty -> use the provider default
     "fallbacks": [],
@@ -181,14 +232,21 @@ def load_config():
     cfg = dict(DEFAULT_CONFIG)
     cfg.update(_read_json_file(CONFIG_FILE))
     cfg.update(_read_json_file(CONFIG_LOCAL_FILE))
+    provider = str(cfg.get("provider") or "").strip().lower()
+    if provider in LEGACY_PROVIDERS:      # e.g. the retired OpenCode Zen
+        provider = LEGACY_PROVIDERS[provider]
+    if provider not in PROVIDERS:
+        provider = DEFAULT_PROVIDER
+    cfg["provider"] = provider
     # env vars win, so keys can be injected without touching disk
-    env_key = (os.environ.get("JARVIS_API_KEY")
-               or os.environ.get("OPENROUTER_API_KEY")
-               or os.environ.get("OPENCODE_API_KEY"))
-    if env_key:
-        cfg["api_key"] = env_key
-    if not cfg.get("provider"):
-        cfg["provider"] = "openrouter"
+    for name in ("JARVIS_API_KEY", "OPENROUTER_API_KEY", "OPENCODE_API_KEY"):
+        if os.environ.get(name):
+            cfg["api_key"] = os.environ[name]
+            break
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        if os.environ.get(name):
+            cfg["gemini_api_key"] = os.environ[name]
+            break
     return cfg
 
 
@@ -215,26 +273,80 @@ def save_config(cfg):
     return True
 
 
+# --------------------------------------------------------------------------
+# provider helpers
+# --------------------------------------------------------------------------
+
+def provider_info(cfg):
+    return PROVIDERS.get(cfg_provider(cfg), PROVIDERS[DEFAULT_PROVIDER])
+
+
+def cfg_provider(cfg):
+    """The active provider id, with retired names mapped onto their successor."""
+    p = str((cfg or {}).get("provider") or DEFAULT_PROVIDER).strip().lower()
+    p = LEGACY_PROVIDERS.get(p, p)
+    return p if p in PROVIDERS else DEFAULT_PROVIDER
+
+
+def key_field(cfg):
+    """Which secret slot this provider reads/writes."""
+    return "gemini_api_key" if cfg_provider(cfg) == "gemini" else "api_key"
+
+
+def cfg_api_key(cfg):
+    """The key for the *active* provider (Gemini has its own slot)."""
+    cfg = cfg or {}
+    field = key_field(cfg)
+    return str(cfg.get(field) or "").strip()
+
+
+def needs_key(cfg):
+    """Puter.js is keyless - the browser is the credential."""
+    return cfg_provider(cfg) != "puter"
+
+
+def brain_ready(cfg):
+    """True when a brain call has any chance of succeeding."""
+    if not needs_key(cfg):
+        return True
+    return bool(cfg_api_key(cfg))
+
+
+def mask_key(key):
+    key = str(key or "")
+    if not key:
+        return ""
+    return (key[:6] + "..." + key[-4:]) if len(key) > 12 else "set"
+
+
 def cfg_base_url(cfg):
     return (cfg.get("base_url") or "").strip() or \
-        PROVIDERS.get(cfg.get("provider", "openrouter"), {}).get("base_url", "")
+        PROVIDERS.get(cfg_provider(cfg), {}).get("base_url", "")
 
 
 def cfg_model(cfg):
     return (cfg.get("model") or "").strip() or \
-        PROVIDERS.get(cfg.get("provider", "openrouter"), {}).get("model", "")
+        PROVIDERS.get(cfg_provider(cfg), {}).get("model", "")
 
 
 def candidate_models(cfg):
-    """Primary model first, then fallbacks, de-duplicated."""
+    """Primary model first, then the provider's other free models.
+
+    Free model IDs rotate and rate-limit constantly, so the provider pool is
+    always queued behind the configured model - one dead model should cost a
+    retry, not the whole command. ``custom`` endpoints get no pool: their model
+    list is whatever the user typed.
+    """
+    provider = cfg_provider(cfg)
     models = []
     for m in [cfg_model(cfg)] + list(cfg.get("fallbacks") or []):
         m = str(m or "").strip()
         if m and m not in models:
             models.append(m)
-    if not models:
-        pool = ZEN_FALLBACKS if cfg.get("provider") == "zen" else FALLBACK_MODELS
-        models = list(pool)
+    if provider != "custom":
+        for m in FALLBACK_POOLS.get(provider, FALLBACK_MODELS):
+            if m not in models:
+                models.append(m)
     return models
 
 
@@ -417,15 +529,17 @@ def _tool_help_lines():
 SYSTEM_PROMPT = """You are Richie Jarvis, a witty AI butler that really controls the Windows PC of your boss, {owner}.
 
 Reply with ONE JSON object and nothing else - no markdown, no code fences:
-{{"speak": "<1-2 short sentences to say out loud>", "actions": [{{"name": "...", ...parameters}}]}}
+{{"speak": "<1-2 short sentences to say out loud>", "actions": [{{"tool": "<action name>", ...its parameters}}]}}
 
 Actions you can run:
 {tools}
 
 How to behave:
 - Use "actions": [] when you are only chatting or answering a question.
+- "tool" always names the action; every other key is one of that action's parameters
+  (so opening Paint is {{"tool":"open_app","name":"paint"}} - "name" is the app, not the action).
 - Chain actions when a job needs steps, for example drawing a circle:
-  [{{"name":"open_app","name":"paint"}}, {{"name":"wait","seconds":3}}, {{"name":"draw","shape":"circle"}}]
+  [{{"tool":"open_app","name":"paint"}},{{"tool":"wait","seconds":3}},{{"tool":"draw","shape":"circle"}}]
 - For 3D models use model3d and pick a kind from the list; the file is written to the desktop and opened.
 - {screen}
 - Coordinates are screen pixels with 0,0 at the top-left. Pick sensible values.
@@ -462,11 +576,17 @@ def _http_json(url, payload=None, cfg=None, headers=None, timeout=45):
 def _brain_headers(cfg):
     headers = {
         "Content-Type": "application/json",
-        "Authorization": "Bearer %s" % cfg.get("api_key", ""),
         "Accept": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) jarvis-local/%s" % VERSION,
     }
-    if cfg.get("provider") == "openrouter":
+    provider = cfg_provider(cfg)
+    if provider == "gemini":
+        # Gemini wants its own header; it also accepts ?key=, but a header
+        # keeps the secret out of URLs (and therefore out of every log).
+        headers["x-goog-api-key"] = cfg_api_key(cfg)
+        return headers
+    headers["Authorization"] = "Bearer %s" % cfg_api_key(cfg)
+    if provider == "openrouter":
         # optional, but gets the app attributed on the OpenRouter leaderboards
         headers["HTTP-Referer"] = "http://localhost:%d" % PORT
         headers["X-OpenRouter-Title"] = "Richie Jarvis"
@@ -476,10 +596,37 @@ def _brain_headers(cfg):
 def _call_brain(messages, cfg, max_tokens=400, temperature=0.4, tools=None):
     """Send a chat request. Returns ``(message_dict, error)``.
 
-    ``message_dict`` is the raw assistant message, so ``tool_calls`` survive.
-    Retries 5xx once per model, then walks the fallback model list.
+    ``message_dict`` is an OpenAI-shaped assistant message, so ``tool_calls``
+    survive regardless of which provider actually produced it. Each backend
+    retries 5xx once per model, then walks the fallback model list.
     """
-    if not cfg.get("api_key"):
+    api = provider_info(cfg).get("api", "openai")
+    if api == "gemini":
+        return _call_brain_gemini(messages, cfg, max_tokens, temperature, tools)
+    if api == "puter":
+        msg, err = _call_brain_puter(messages, cfg, max_tokens, temperature, tools)
+        if msg is not None or err == TOOL_UNSUPPORTED:
+            return msg, err
+        # The browser relay is the free brain, but if the tab is closed and a
+        # real key is saved, keep working instead of going dumb.
+        if str(cfg.get("api_key") or "").strip():
+            key = cfg["api_key"].strip()
+            alt = dict(cfg, provider="openrouter" if key.startswith("sk-or") else "custom")
+            print("[jarvis] puter.js unavailable (%s) - falling back to the saved key"
+                  % str(err or "")[:60])
+            return _call_brain_openai(messages, alt, max_tokens, temperature, tools)
+        if str(cfg.get("gemini_api_key") or "").strip():
+            print("[jarvis] puter.js unavailable (%s) - falling back to the Gemini key"
+                  % str(err or "")[:60])
+            return _call_brain_gemini(messages, dict(cfg, provider="gemini"),
+                                      max_tokens, temperature, tools)
+        return None, err
+    return _call_brain_openai(messages, cfg, max_tokens, temperature, tools)
+
+
+def _call_brain_openai(messages, cfg, max_tokens=400, temperature=0.4, tools=None):
+    """OpenAI-compatible ``/chat/completions`` (OpenRouter, custom endpoints)."""
+    if not cfg_api_key(cfg):
         return None, "no api key configured"
     url = cfg_base_url(cfg).rstrip("/") + "/chat/completions"
     if not url.startswith("http"):
@@ -544,6 +691,390 @@ def _call_brain(messages, cfg, max_tokens=400, temperature=0.4, tools=None):
     return None, last_err
 
 
+# --------------------------------------------------------------------------
+# Google Gemini
+#
+# Gemini is *not* OpenAI-compatible: the request is ``contents`` + parts and
+# the reply comes back as ``candidates[0].content.parts``. These two helpers
+# translate in both directions so the rest of Jarvis never notices.
+# --------------------------------------------------------------------------
+
+# Gemini rejects JSON-schema keys it does not implement, and chokes on empty
+# ``properties`` - the OpenAI schemas above use both.
+_GEMINI_SCHEMA_DROP = ("additionalProperties", "$schema", "default", "examples")
+
+
+def _gemini_schema(schema):
+    """Trim an OpenAI parameter schema down to what Gemini accepts."""
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+    out = {}
+    for k, v in schema.items():
+        if k in _GEMINI_SCHEMA_DROP:
+            continue
+        if k in ("properties", "items") and isinstance(v, dict):
+            if k == "properties":
+                out["properties"] = {n: _gemini_schema(s) for n, s in v.items()}
+            else:
+                out["items"] = _gemini_schema(v)
+        else:
+            out[k] = v
+    if out.get("type") == "object" and not out.get("properties"):
+        out.pop("properties", None)   # Gemini rejects an empty properties map
+    return out
+
+
+def _gemini_tools(tools):
+    decls = []
+    for t in tools or []:
+        fn = (t or {}).get("function") or {}
+        name = str(fn.get("name") or "").strip()
+        if not name:
+            continue
+        decls.append({
+            "name": name,
+            "description": str(fn.get("description") or ""),
+            "parameters": _gemini_schema(fn.get("parameters") or {}),
+        })
+    return [{"functionDeclarations": decls}] if decls else None
+
+
+def _gemini_payload(messages, max_tokens, temperature, tools):
+    """OpenAI messages -> Gemini generateContent body."""
+    system, contents = [], []
+    for m in messages or []:
+        role = str((m or {}).get("role") or "user")
+        text = (m or {}).get("content")
+        if isinstance(text, list):      # multimodal parts we do not send yet
+            text = " ".join(str(p.get("text") or "") for p in text
+                            if isinstance(p, dict))
+        text = str(text or "")
+        if role == "system":
+            system.append(text)
+        elif role in ("assistant", "model"):
+            contents.append({"role": "model", "parts": [{"text": text}]})
+        else:
+            contents.append({"role": "user", "parts": [{"text": text}]})
+    if not contents:
+        # Gemini needs at least one turn; fold the system text into a user one.
+        contents = [{"role": "user",
+                     "parts": [{"text": "\n\n".join(system) if system else " "}]}]
+        system = []
+    payload = {
+        "contents": contents,
+        "generationConfig": {
+            "temperature": float(temperature),
+            # Flash models spend output tokens *thinking*, so a 360-token cap
+            # can come back empty. Give them room and trim on our side.
+            "maxOutputTokens": max(1024, int(max_tokens) * 4),
+        },
+    }
+    if system:
+        payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(system)}]}
+    decls = _gemini_tools(tools)
+    if decls:
+        payload["tools"] = decls
+    return payload
+
+
+def _gemini_message(data):
+    """Gemini response -> OpenAI-shaped assistant message."""
+    cands = (data or {}).get("candidates") or []
+    if not cands:
+        return {}, (data or {}).get("promptFeedback", {}).get("blockReason", "") \
+            or "no candidates returned"
+    cand = cands[0] or {}
+    parts = ((cand.get("content") or {}).get("parts")) or []
+    text, tool_calls = [], []
+    for p in parts:
+        if not isinstance(p, dict):
+            continue
+        if p.get("text"):
+            text.append(str(p["text"]))
+        fc = p.get("functionCall") or p.get("function_call")
+        if isinstance(fc, dict) and fc.get("name"):
+            args = fc.get("args")
+            if args is None:
+                args = fc.get("arguments") or {}
+            tool_calls.append({
+                "id": str(fc.get("id") or "call_%d" % len(tool_calls)),
+                "type": "function",
+                "function": {"name": str(fc["name"]),
+                             "arguments": json.dumps(args if isinstance(args, dict) else {})},
+            })
+    msg = {"role": "assistant", "content": "".join(text)}
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+    finish = str(cand.get("finishReason") or "")
+    if finish in ("MAX_TOKENS",) and not msg["content"] and not tool_calls:
+        return msg, "the reply was cut off by the token limit"
+    if finish in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST") and not msg["content"]:
+        return msg, "blocked by Google's safety filters (%s)" % finish
+    return msg, ""
+
+
+def _call_brain_gemini(messages, cfg, max_tokens=400, temperature=0.4, tools=None):
+    key = cfg_api_key(cfg)
+    if not key:
+        return None, ("no Gemini API key configured - get a free one at "
+                      "aistudio.google.com/apikey")
+    base = cfg_base_url(cfg).rstrip("/")
+    if not base.startswith("http"):
+        base = PROVIDERS["gemini"]["base_url"]
+    headers = _brain_headers(cfg)
+    last_err = "unknown error"
+
+    for model in candidate_models(cfg):
+        model = model.replace("models/", "")
+        url = "%s/models/%s:generateContent" % (base, urllib.parse.quote(model))
+        payload = _gemini_payload(messages, max_tokens, temperature, tools)
+        for attempt in range(2):
+            try:
+                data = _http_json(url, payload, cfg, headers, timeout=60)
+            except urllib.error.HTTPError as e:
+                detail, status = "", ""
+                try:
+                    body = json.loads(e.read().decode("utf-8", "replace"))
+                    err = body.get("error") or {}
+                    detail = str(err.get("message") or "")
+                    status = str(err.get("status") or "")
+                except Exception:
+                    pass
+                if e.code in (400, 403) and status in ("INVALID_ARGUMENT",) \
+                        and tools and "function" in detail.lower():
+                    return None, TOOL_UNSUPPORTED
+                if e.code in (400, 403) and ("api key" in detail.lower()
+                                             or status in ("PERMISSION_DENIED", "FAILED_PRECONDITION")
+                                             and "key" in detail.lower()):
+                    return None, ("Gemini rejected that API key - open the gear icon and "
+                                  "paste a key from aistudio.google.com/apikey")
+                if e.code == 429:
+                    last_err = "Gemini free tier rate limit reached (%s)" % (detail[:80] or "429")
+                    time.sleep(1.0)
+                    break               # try the next model, not the same one
+                if e.code == 404:
+                    last_err = "model %s is not available on this key" % model
+                    break
+                last_err = "gemini %s error %s: %s" % (model, e.code, (detail or status)[:120])
+                if e.code >= 500:
+                    time.sleep(0.6)
+                    continue
+                break
+            except Exception as e:
+                last_err = str(e)
+                time.sleep(0.6)
+                continue
+
+            msg, why = _gemini_message(data)
+            if not msg.get("content") and not msg.get("tool_calls"):
+                last_err = why or "model %s returned an empty reply" % model
+                break
+            _state["last_model"] = str(model)
+            return msg, ""
+
+        print("[jarvis] gemini model '%s' failed (%s) - trying the next one..." % (model, last_err))
+    return None, last_err
+
+
+# --------------------------------------------------------------------------
+# Puter.js - a free brain with no API key
+#
+# Puter.js only exists in the browser, so the dashboard page acts as a relay:
+# the server queues a job, the page picks it up with ``puter.ai.chat()``, and
+# posts the answer back. The whole agent loop (tools, actions, chat) still
+# runs in Python - only the HTTP hop to the model moves to the browser.
+# --------------------------------------------------------------------------
+
+PUTER_JOB_TTL = 90.0          # seconds a queued job waits for a browser
+PUTER_STALE_AFTER = 45.0      # relay silence older than this = "page closed"
+
+_PUTER = {
+    "lock": threading.Lock(),
+    "jobs": {},          # id -> job dict
+    "queue": [],         # ids in arrival order
+    "models": [],        # pushed up by the page from puter.ai.listModels()
+    "models_at": 0.0,
+    "last_seen": 0.0,    # last poll from a browser
+    "version": "",
+    "signed_in": None,
+    "runs": 0,
+    "failures": 0,
+}
+
+
+def puter_alive(max_age=PUTER_STALE_AFTER):
+    with _PUTER["lock"]:
+        return (time.time() - _PUTER["last_seen"]) < max_age if _PUTER["last_seen"] else False
+
+
+def puter_status():
+    with _PUTER["lock"]:
+        seen = _PUTER["last_seen"]
+        return {
+            "provider": "puter",
+            "relay": bool(seen and (time.time() - seen) < PUTER_STALE_AFTER),
+            "last_seen": round(time.time() - seen, 1) if seen else None,
+            "pending": len(_PUTER["queue"]),
+            "models": len(_PUTER["models"]),
+            "signed_in": _PUTER["signed_in"],
+            "runs": _PUTER["runs"],
+            "failures": _PUTER["failures"],
+        }
+
+
+def _puter_prune(now):
+    """Drop jobs nobody collected (caller holds the lock)."""
+    for jid in list(_PUTER["queue"]):
+        job = _PUTER["jobs"].get(jid)
+        if job and (now - job.get("created", now)) > PUTER_JOB_TTL:
+            _PUTER["queue"].remove(jid)
+            job["result"] = {"ok": False, "error": "no Puter.js relay answered in time"}
+            job["done"] = True
+
+
+def puter_claim(timeout=0.0):
+    """Hand the oldest queued job to a browser. Blocks up to ``timeout``."""
+    deadline = time.time() + max(0.0, float(timeout or 0.0))
+    while True:
+        with _PUTER["lock"]:
+            _PUTER["last_seen"] = time.time()
+            _puter_prune(time.time())
+            while _PUTER["queue"]:
+                jid = _PUTER["queue"].pop(0)
+                job = _PUTER["jobs"].get(jid)
+                if job and not job.get("claimed") and not job.get("done"):
+                    job["claimed"] = time.time()
+                    job["version"] += 1
+                    return dict(job["request"], id=jid)
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.25)
+
+
+def puter_complete(jid, result):
+    with _PUTER["lock"]:
+        job = _PUTER["jobs"].get(str(jid or ""))
+        if not job:
+            return False
+        job["result"] = result if isinstance(result, dict) else {"ok": False, "error": str(result)}
+        job["done"] = True
+        if job["result"].get("ok"):
+            _PUTER["runs"] += 1
+        else:
+            _PUTER["failures"] += 1
+        return True
+
+
+def puter_set_models(models, signed_in=None):
+    out = []
+    for m in models or []:
+        if isinstance(m, str):
+            m = {"id": m}
+        if not isinstance(m, dict):
+            continue
+        mid = str(m.get("id") or m.get("key") or m.get("model") or "").strip()
+        if not mid or mid.startswith("puter/"):
+            continue
+        out.append({
+            "id": mid,
+            "name": str(m.get("name") or m.get("description") or mid)[:80],
+            "context": int(m.get("max_input_tokens") or m.get("context_length") or 0),
+            # Puter normalises every vendor to OpenAI tool calling.
+            "tools": bool(m.get("supports_tools", True)),
+            "free": True,
+        })
+    seen, uniq = set(), []
+    for m in out:
+        if m["id"] in seen:
+            continue
+        seen.add(m["id"])
+        uniq.append(m)
+    # Known-good free models first (in PUTER_FALLBACKS order), then the rest
+    # alphabetically - the dropdown's top entry is what Jarvis will use.
+    uniq.sort(key=lambda x: (PUTER_FALLBACKS.index(x["id"])
+                             if x["id"] in PUTER_FALLBACKS else len(PUTER_FALLBACKS),
+                             not x["tools"], x["id"]))
+    with _PUTER["lock"]:
+        _PUTER["models"] = uniq
+        _PUTER["models_at"] = time.time()
+        if signed_in is not None:
+            _PUTER["signed_in"] = bool(signed_in)
+    return uniq
+
+
+def puter_models():
+    with _PUTER["lock"]:
+        return list(_PUTER["models"])
+
+
+def _puter_wait(jid, timeout):
+    """Block until the browser answers (or the job expires)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with _PUTER["lock"]:
+            job = _PUTER["jobs"].get(jid)
+            if not job:
+                return None
+            if job.get("done"):
+                return job.get("result")
+        time.sleep(0.2)
+    with _PUTER["lock"]:
+        job = _PUTER["jobs"].pop(jid, None)
+        if job and jid in _PUTER["queue"]:
+            _PUTER["queue"].remove(jid)
+    return None
+
+
+def _call_brain_puter(messages, cfg, max_tokens=400, temperature=0.4, tools=None):
+    if not puter_alive():
+        return None, ("the Puter.js relay is not connected - open the Jarvis dashboard "
+                      "page in a browser (that tab is the free brain) and keep it open")
+    jid = "job-%d-%d" % (int(time.time() * 1000), len(_PUTER["jobs"]) + 1)
+    request = {
+        "messages": messages,
+        "models": candidate_models(cfg),
+        "max_tokens": int(max_tokens),
+        "temperature": float(temperature),
+        "tools": tools or [],
+        "created": time.time(),
+    }
+    with _PUTER["lock"]:
+        _puter_prune(time.time())
+        _PUTER["jobs"][jid] = {"request": request, "result": None, "done": False,
+                               "claimed": 0.0, "created": time.time(), "version": 0}
+        _PUTER["queue"].append(jid)
+        if len(_PUTER["jobs"]) > 40:                 # never grow without bound
+            for old in sorted(_PUTER["jobs"], key=lambda k: _PUTER["jobs"][k]["created"])[:-20]:
+                _PUTER["jobs"].pop(old, None)
+                if old in _PUTER["queue"]:
+                    _PUTER["queue"].remove(old)
+    print("[jarvis] puter.js job %s queued (%s)" % (jid, request["models"][0]))
+    result = _puter_wait(jid, PUTER_JOB_TTL)
+    with _PUTER["lock"]:
+        _PUTER["jobs"].pop(jid, None)
+        if jid in _PUTER["queue"]:
+            _PUTER["queue"].remove(jid)
+    if result is None:
+        return None, ("Puter.js did not answer in time - is the dashboard tab still open "
+                      "and signed in to Puter?")
+    if not result.get("ok"):
+        err = str(result.get("error") or "unknown puter.js error")
+        if "sign" in err.lower() or "auth" in err.lower():
+            return None, "Puter.js wants you to sign in - open the dashboard and click CONNECT PUTER"
+        if "tool" in err.lower() and tools:
+            return None, TOOL_UNSUPPORTED
+        return None, "puter.js: %s" % err[:160]
+    msg = result.get("message") or {}
+    if not isinstance(msg, dict):
+        msg = {"content": str(msg)}
+    msg.setdefault("role", "assistant")
+    if result.get("model"):
+        _state["last_model"] = "puter:%s" % result["model"]
+    if not msg.get("content") and not msg.get("tool_calls"):
+        return None, "puter.js returned an empty reply"
+    return msg, ""
+
+
 def _extract_json(content):
     """Pull the first JSON object out of a reply, tolerating prose/fences."""
     if not content:
@@ -567,6 +1098,33 @@ def _extract_json(content):
     return {}
 
 
+def _split_action(raw):
+    """Split one action dict into ``(tool_name, params)``.
+
+    The tool name travels in ``tool`` (or the legacy ``name``) - but ``name``
+    is *also* a real parameter of open_app/picture, so when both are present
+    the parameter wins and the tool name is read from ``tool``/``__tool``.
+    """
+    if not isinstance(raw, dict):
+        return "", {}
+    for key in ("__tool", "tool"):
+        if str(raw.get(key) or "").strip() in TOOL_NAMES:
+            return str(raw[key]).strip(), \
+                {k: v for k, v in raw.items() if k not in ("__tool", "tool")}
+    name = str(raw.get("name") or "").strip()
+    params = {k: v for k, v in raw.items() if k != "name"}
+    if name in TOOL_NAMES:
+        return name, params
+    # Repair a model that answered {"name": "notepad"} while meaning open_app:
+    # if some other value is a known tool name, that one is the discriminator.
+    for key, value in list(params.items()):
+        if str(value).strip() in TOOL_NAMES:
+            params.pop(key)
+            params["name"] = name
+            return str(value).strip(), params
+    return name, params
+
+
 def _actions_from_message(msg):
     """Normalise either native tool_calls or a JSON reply into action dicts."""
     actions = []
@@ -578,8 +1136,13 @@ def _actions_from_message(msg):
             args = {}
         if not isinstance(args, dict):
             args = {}
-        name = fn.get("name")
-        if name:
+        name = str(fn.get("name") or "").strip()
+        if not name:
+            continue
+        if "name" in args:
+            # keep the model's own "name" argument (open_app, picture, ...)
+            actions.append(dict(args, tool=name))
+        else:
             actions.append(dict(args, name=name))
 
     obj = _extract_json(msg.get("content") or "")
@@ -587,13 +1150,22 @@ def _actions_from_message(msg):
         one = obj.get("action")
         many = obj.get("actions")
         if isinstance(many, list):
-            actions.extend([a for a in many if isinstance(a, dict) and a.get("name")])
-        elif isinstance(one, dict) and one.get("name"):
+            actions.extend([a for a in many
+                            if isinstance(a, dict) and (a.get("tool") or a.get("name"))])
+        elif isinstance(one, dict) and (one.get("tool") or one.get("name")):
             actions.append(one)
     return actions, obj
 
 
 def _speak_from_message(msg, obj):
+    """Pick the line to say out loud.
+
+    When the model used native tool calls (Gemini ``functionCall`` parts,
+    Puter.js ``tool_calls``), any prose next to them is deliberately *not*
+    spoken: the executed actions report themselves, so saying both would give
+    "Opening Notepad, sir. Opening notepad." Prose is only used when there
+    were no actions and no JSON instruction blob.
+    """
     content = (msg.get("content") or "").strip()
     speak = str(obj.get("speak") or "").strip()
     if not speak and content and not obj.get("action") and not obj.get("actions") \
@@ -633,10 +1205,9 @@ def run_action_list(actions):
             break
         if not isinstance(raw, dict):
             continue
-        name = str(raw.get("name") or "").strip()
+        name, params = _split_action(raw)
         if not name:
             continue
-        params = {k: v for k, v in raw.items() if k != "name"}
         try:
             out = run_action(name, params)      # run_action() logs each step
         except Exception as e:
@@ -646,12 +1217,22 @@ def run_action_list(actions):
     return results
 
 
+def _no_brain_message(cfg=None):
+    """What Jarvis says when the brain cannot be reached at all."""
+    cfg = cfg if cfg is not None else load_config()
+    if cfg_provider(cfg) == "puter":
+        return ("My brain runs through Puter.js in the browser, so keep the Jarvis "
+                "dashboard tab open - that is what does the thinking. Click CONNECT "
+                "PUTER in the settings if it asks you to sign in.")
+    return ("My brain is not connected. Open the gear icon, pick a provider, paste "
+            "an API key and choose one of the free models.")
+
+
 def llm_reply(text):
     """Ask the brain what to do, then do it. Returns the spoken reply."""
     cfg = load_config()
-    if not cfg.get("api_key"):
-        return ("My brain is not connected. Open the gear icon, pick a provider, paste "
-                "an API key and choose one of the free models.")
+    if not brain_ready(cfg):
+        return _no_brain_message(cfg)
     _state["pending_artifact"] = None
     messages = [
         {"role": "system", "content": system_prompt()},
@@ -697,9 +1278,8 @@ CHAT_SYSTEM = (
 
 def chat_reply(session, text):
     cfg = load_config()
-    if not cfg.get("api_key"):
-        return ("My brain isn't connected yet. Open the settings gear (top-right) and "
-                "paste an OpenCode Zen API key, then I can chat with you.")
+    if not brain_ready(cfg):
+        return _no_brain_message(cfg)
     with _CHAT_LOCK:
         hist = _CHAT_SESSIONS.setdefault(session, [])
         hist.append({"role": "user", "content": text})
@@ -1314,8 +1894,7 @@ def _dispatch(name, params):
 def run_action(name, params=None):
     """Run one action and record it in the audit log the UI shows."""
     if isinstance(name, dict):          # legacy single-dict call style
-        params = {k: v for k, v in name.items() if k != "name"}
-        name = name.get("name")
+        name, params = _split_action(name)
     params = params or {}
     try:
         out = _dispatch(name, params)
@@ -2532,20 +3111,62 @@ def session_state():
     st = eng.status()
     st["transcript"] = eng.session.transcript(40)
     return st
-def fetch_free_models(cfg, force=False):
-    """Free models offered by the current provider, best first.
+# Model lists are cached per provider, so flipping between OpenRouter, Gemini
+# and Puter does not show a stale line-up.
+_FREE_MODEL_CACHE = {"by_provider": {}, "lock": threading.Lock()}
+_MODEL_CACHE_TTL = 900.0
 
-    Ranked so tool-capable models with the largest context come first, which
-    is exactly what a PC-controlling assistant wants. Cached for 15 minutes.
-    """
-    cached = _state.get("free_models")
-    stamp = float(_state.get("free_models_at", 0) or 0)
-    if cached and not force and (time.time() - stamp) < 900:
-        return cached
-    if not cfg.get("api_key"):
-        raise RuntimeError("no API key saved yet")
-    provider = cfg.get("provider", "openrouter")
+# Gemini serves image/video/TTS/embedding models from the same endpoint; only
+# text generators can drive Jarvis.
+_GEMINI_SKIP = ("image", "imagen", "veo", "banana", "tts", "live", "transcribe",
+                "embed", "aqa", "omni", "speech", "translate", "pro-preview")
+
+
+def _gemini_model_rank(mid):
+    """Free Flash models first, newest first, paid Pro models last."""
+    low = mid.lower()
+    if "flash-lite" in low or "lite" in low:
+        tier = 0
+    elif "flash" in low or low.startswith("gemma"):
+        tier = 1
+    else:
+        tier = 2
+    m = re.search(r"(\d+)(?:\.(\d+))?", low)
+    ver = (int(m.group(1)), int(m.group(2) or 0)) if m else (0, 0)
+    return (tier, -ver[0], -ver[1], low)
+
+
+def _fetch_gemini_models(cfg):
+    base = cfg_base_url(cfg).rstrip("/") or PROVIDERS["gemini"]["base_url"]
+    data = _http_json(base + "/models?pageSize=200", None, cfg, _brain_headers(cfg),
+                      timeout=25)
+    out = []
+    for m in data.get("models") or []:
+        name = str(m.get("name") or "").replace("models/", "").strip()
+        if not name:
+            continue
+        methods = m.get("supportedGenerationMethods") or []
+        if methods and "generateContent" not in methods:
+            continue
+        low = name.lower()
+        if any(skip in low for skip in _GEMINI_SKIP):
+            continue
+        out.append({
+            "id": name,
+            "name": str(m.get("displayName") or name),
+            "context": int(m.get("inputTokenLimit") or 0),
+            "tools": True,          # every Gemini text model does function calling
+            "free": ("flash" in low or "lite" in low or low.startswith("gemma")),
+        })
+    out.sort(key=lambda x: (not x["free"], _gemini_model_rank(x["id"])))
+    return out
+
+
+def _fetch_openai_models(cfg):
+    provider = cfg_provider(cfg)
     url = cfg_base_url(cfg).rstrip("/") + "/models"
+    if not url.startswith("http"):
+        raise RuntimeError("no API base url configured")
     data = _http_json(url, None, cfg, _brain_headers(cfg), timeout=25)
     items = data.get("data") or []
     out = []
@@ -2559,8 +3180,6 @@ def fetch_free_models(cfg, force=False):
         except (TypeError, ValueError):
             cost = 0.0
         free = mid.endswith(":free") or cost == 0.0
-        if provider == "zen" and not free:
-            free = ("free" in mid.lower()) or mid == "big-pickle"
         if not free:
             continue
         sup = m.get("supported_parameters") or []
@@ -2568,16 +3187,62 @@ def fetch_free_models(cfg, force=False):
             "id": mid,
             "name": str(m.get("name") or mid),
             "context": int(m.get("context_length") or 0),
-            "tools": bool(("tools" in sup) or provider != "openrouter"),
+            "tools": bool((not sup) or ("tools" in sup) or provider != "openrouter"),
+            "free": True,
         })
     out.sort(key=lambda x: (not x["tools"], -x["context"]))
-    _state["free_models"] = out
-    _state["free_models_at"] = time.time()
     return out
+
+
+def fetch_free_models(cfg, force=False):
+    """Free models offered by the current provider, best first.
+
+    Ranked so tool-capable models with the largest context come first, which
+    is exactly what a PC-controlling assistant wants. Cached for 15 minutes.
+    """
+    provider = cfg_provider(cfg)
+    with _FREE_MODEL_CACHE["lock"]:
+        hit = _FREE_MODEL_CACHE["by_provider"].get(provider)
+        if hit and not force and (time.time() - hit[1]) < _MODEL_CACHE_TTL:
+            return list(hit[0])
+
+    if provider == "puter":
+        models = puter_models()
+        if not models:
+            if not puter_alive():
+                raise RuntimeError("open the Jarvis dashboard so Puter.js can report "
+                                   "its free model list")
+            raise RuntimeError("Puter.js has not reported its models yet - wait a "
+                               "moment and hit refresh")
+    elif not cfg_api_key(cfg):
+        raise RuntimeError("no API key saved yet"
+                           + (" - get a free one at aistudio.google.com/apikey"
+                              if provider == "gemini" else ""))
+    elif provider == "gemini":
+        models = _fetch_gemini_models(cfg)
+    else:
+        models = _fetch_openai_models(cfg)
+
+    with _FREE_MODEL_CACHE["lock"]:
+        _FREE_MODEL_CACHE["by_provider"][provider] = (list(models), time.time())
+    return models
+
+
+def clear_model_cache(provider=None):
+    with _FREE_MODEL_CACHE["lock"]:
+        if provider:
+            _FREE_MODEL_CACHE["by_provider"].pop(provider, None)
+        else:
+            _FREE_MODEL_CACHE["by_provider"].clear()
+    _state["free_models"] = None
 
 
 def verify_key(cfg):
     """Tiny round trip to prove the key/model actually work."""
+    if not brain_ready(cfg):
+        return {"ok": False,
+                "message": (_no_brain_message(cfg) if cfg_provider(cfg) == "puter"
+                            else "no API key saved yet")}
     msg, err = _call_brain(
         [{"role": "user", "content": "Reply with the single word: ready"}],
         cfg, max_tokens=16, temperature=0.1)
@@ -2614,13 +3279,18 @@ class Handler(BaseHTTPRequestHandler):
             body = data
         else:
             body = str(data).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", f"{ctype}; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self._cors()
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", f"{ctype}; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self._cors()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # The Puter.js relay long-polls /puter/jobs, so a tab being closed
+            # or reloaded mid-reply is normal - not worth a traceback.
+            pass
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -2647,41 +3317,76 @@ class Handler(BaseHTTPRequestHandler):
             w, h = _screen_size()
             self._send(200, {"status": "ok", "version": VERSION,
                              "time": datetime.now().isoformat(timespec="seconds"),
-                             "brain": bool(cfg.get("api_key")),
-                             "provider": cfg.get("provider", ""),
+                             "brain": brain_ready(cfg),
+                             "provider": cfg_provider(cfg),
+                             "puter": puter_status()["relay"] if cfg_provider(cfg) == "puter" else None,
                              "model": cfg_model(cfg),
                              "last_model": _state.get("last_model", ""),
                              "screen": [w, h],
                              "tools": bool(_state.get("tools_ok", True))})
             return
+        if path == "/providers":
+            self._send(200, {"providers": [
+                dict(id=pid, **{k: v for k, v in spec.items() if k != "key_env"})
+                for pid, spec in PROVIDERS.items()],
+                "puter": puter_status()})
+            return
+        if path == "/puter/status":
+            self._send(200, puter_status())
+            return
+        if path == "/puter/jobs":
+            # Long-poll: the dashboard tab parks here until there is work.
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                wait = min(55.0, max(0.0, float((qs.get("wait") or ["20"])[0])))
+            except (TypeError, ValueError):
+                wait = 20.0
+            job = puter_claim(wait)
+            self._send(200, {"job": job, "relay": True, "server_time": time.time()})
+            return
         if path == "/config":
             cfg = load_config()
-            key = cfg.get("api_key", "")
-            masked = (key[:6] + "..." + key[-4:]) if len(key) > 12 else ("set" if key else "")
+            provider = cfg_provider(cfg)
+            key = cfg_api_key(cfg)
             models = []
             try:
                 models = fetch_free_models(cfg)[:40]
             except Exception:
                 models = []
-            self._send(200, {"has_key": bool(key), "key_masked": masked,
-                             "provider": cfg.get("provider", "openrouter"),
+            info = provider_info(cfg)
+            self._send(200, {"has_key": bool(key), "key_masked": mask_key(key),
+                             "needs_key": needs_key(cfg),
+                             "brain": brain_ready(cfg),
+                             "provider": provider,
+                             "provider_label": info.get("label", ""),
+                             "key_label": info.get("key_label", "API key"),
+                             "key_hint": info.get("key_hint", ""),
+                             "key_url": info.get("key_url", ""),
                              "base_url": cfg.get("base_url", ""),
                              "model": cfg.get("model", ""),
                              "model_default": cfg_model(cfg),
                              "fallbacks": cfg.get("fallbacks", []),
                              "models": models,
+                             "puter": puter_status() if provider == "puter" else None,
                              "safe_mode": bool(cfg.get("safe_mode", True)),
                              "failsafe": bool(cfg.get("failsafe", True)),
                              "speed": cfg.get("speed", 1.0),
                              "max_actions": cfg.get("max_actions", 6)})
             return
         if path == "/models":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             cfg = load_config()
+            want = str((qs.get("provider") or [""])[0]).strip().lower()
+            if want in PROVIDERS and want != cfg_provider(cfg):
+                # preview another provider's line-up without saving it yet
+                cfg = dict(cfg, provider=want, model="", base_url="")
             try:
                 models = fetch_free_models(cfg, force="refresh" in self.path)
-                self._send(200, {"models": models, "count": len(models)})
+                self._send(200, {"models": models, "count": len(models),
+                                 "provider": cfg_provider(cfg)})
             except Exception as e:
-                self._send(200, {"models": [], "count": 0, "error": str(e)})
+                self._send(200, {"models": [], "count": 0, "error": str(e),
+                                 "provider": cfg_provider(cfg)})
             return
         if path == "/artifact":
             self._send(200, {"artifact": _state.get("last_artifact")})
@@ -2711,10 +3416,21 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/config":
             cfg = load_config()
-            for key in ("provider", "model", "base_url", "api_key"):
+            old_provider = cfg_provider(cfg)
+            for key in ("provider", "model", "base_url"):
                 val = payload.get(key, None)
                 if isinstance(val, str):
                     cfg[key] = val.strip()
+            # A key typed while a provider is selected lands in that provider's
+            # own slot, so Gemini and OpenRouter keys survive a switch.
+            for slot in SECRET_KEYS:
+                val = payload.get(slot, None)
+                if isinstance(val, str) and val.strip():
+                    cfg[slot] = val.strip()
+            typed = payload.get("api_key")
+            if isinstance(typed, str) and typed.strip() and \
+                    cfg_provider(cfg) == "gemini" and "gemini_api_key" not in payload:
+                cfg["gemini_api_key"] = typed.strip()
             if isinstance(payload.get("fallbacks"), list):
                 cfg["fallbacks"] = [str(x).strip() for x in payload["fallbacks"] if str(x).strip()]
             for key in ("safe_mode", "failsafe", "listen", "secretary"):
@@ -2726,22 +3442,52 @@ class Handler(BaseHTTPRequestHandler):
                         cfg[key] = float(payload[key]) if key == "speed" else int(payload[key])
                     except (TypeError, ValueError):
                         pass
+            cfg["provider"] = cfg_provider(cfg)      # normalise legacy names
             save_config(cfg)
             _state["tools_ok"] = True          # new model may support tools
-            _state["free_models"] = None       # provider may have changed
+            clear_model_cache()                # provider may have changed
+            if cfg_provider(cfg) != old_provider:
+                _state["last_model"] = ""
             try:
                 fetch_free_models(cfg, force=True)
             except Exception:
                 pass
-            self._send(200, {"saved": True, "has_key": bool(cfg.get("api_key")),
-                             "model": cfg_model(cfg), "provider": cfg.get("provider", "")})
+            provider = cfg_provider(cfg)
+            self._send(200, {"saved": True, "has_key": bool(cfg_api_key(cfg)),
+                             "needs_key": needs_key(cfg), "brain": brain_ready(cfg),
+                             "model": cfg_model(cfg), "provider": provider,
+                             "key_masked": mask_key(cfg_api_key(cfg)),
+                             "puter": puter_status() if provider == "puter" else None})
+            return
+
+        # ---- Puter.js relay (the dashboard tab is the free brain) --------
+        if path == "/puter/result":
+            ok = puter_complete(payload.get("id"), {
+                "ok": bool(payload.get("ok", True)),
+                "message": payload.get("message") or {},
+                "model": str(payload.get("model") or ""),
+                "error": str(payload.get("error") or ""),
+            })
+            self._send(200, {"accepted": ok})
+            return
+        if path == "/puter/models":
+            models = puter_set_models(payload.get("models") or [],
+                                      payload.get("signed_in"))
+            clear_model_cache("puter")
+            self._send(200, {"saved": len(models), "models": models[:60]})
+            return
+        if path == "/puter/ping":
+            with _PUTER["lock"]:
+                _PUTER["last_seen"] = time.time()
+                if payload.get("signed_in") is not None:
+                    _PUTER["signed_in"] = bool(payload.get("signed_in"))
+                if payload.get("version"):
+                    _PUTER["version"] = str(payload.get("version"))[:20]
+            self._send(200, puter_status())
             return
 
         if path == "/test":
             cfg = load_config()
-            if not cfg.get("api_key"):
-                self._send(200, {"ok": False, "message": "no API key saved yet"})
-                return
             self._send(200, verify_key(cfg))
             return
 
@@ -2842,8 +3588,9 @@ class Handler(BaseHTTPRequestHandler):
         reply = parse_command(text)
         if reply is None:
             cfg = load_config()
-            if cfg.get("api_key"):
-                print("[jarvis] asking the brain (%s)..." % cfg_model(cfg))
+            if brain_ready(cfg):
+                print("[jarvis] asking the brain (%s/%s)..."
+                      % (cfg_provider(cfg), cfg_model(cfg)))
                 reply = llm_reply(text)
             if not reply:
                 reply = ("I don't know how to do that yet. Connect my brain in settings, "
@@ -2869,9 +3616,15 @@ def main():
         return
     print(f"* Richie Jarvis {VERSION} online -> http://localhost:{PORT}")
     print("* Open that address in Chrome/Edge, allow the microphone, and speak after saying 'Richie Jarvis'.")
+    provider = cfg_provider(cfg)
+    if provider == "puter":
+        brain = "Puter.js relay (open the dashboard tab - no API key needed)"
+    elif brain_ready(cfg):
+        brain = "connected (%s)" % PROVIDERS[provider]["label"]
+    else:
+        brain = "NOT CONNECTED (open the gear icon)"
     print("* Provider: %s | model: %s | brain: %s"
-          % (cfg.get("provider", "openrouter"), cfg_model(cfg),
-             "connected" if cfg.get("api_key") else "NOT CONNECTED (open the gear icon)"))
+          % (provider, cfg_model(cfg), brain))
     if HOST not in ("127.0.0.1", "localhost"):
         print(f"* WARNING: listening on {HOST} - anything on your network can drive this PC.")
     if load_config().get("secretary"):
