@@ -7,7 +7,9 @@ move/click/drag the **real mouse**, draw pictures, generate 3D model files,
 control windows, send WhatsApp messages and run shell commands.
 
 Everything runs on your machine. The only thing that leaves it is the text you
-send to whichever model provider you configure.
+send to whichever brain you pick — and with the default **Puter.js** provider
+that trip is made by your browser, not by the Python core, so there is no API
+key stored anywhere.
 
 ---
 
@@ -18,31 +20,66 @@ setup.bat          :: installs pyautogui / psutil / vosk (once)
 start_jarvis.bat   :: starts the core and opens http://localhost:8765
 ```
 
-Then click the **gear** icon in the top right and connect a brain.
+That is it — the brain is free and keyless out of the box. Keep the dashboard
+tab open, and click the **gear** icon only if you want to switch to Gemini or
+OpenRouter.
 
-## Connecting a free brain
+## Connecting a brain (for free)
 
-Jarvis talks to any OpenAI-compatible endpoint. Two providers offer free
-models today:
+Three ways in, ordered by how little they cost you:
 
-| Provider | Where to get a key | Free models |
+| Provider | What you need | Models |
 |---|---|---|
-| **OpenRouter** (recommended) | <https://openrouter.ai/keys> | dozens of `:free` models |
-| **OpenCode Zen** | <https://opencode.ai/auth> | ~7 free models |
+| **Puter.js** (default) | nothing — no API key, no card | 500+ via Puter's ["user pays" model](https://docs.puter.com/AI/) |
+| **Google Gemini** | a free key from <https://aistudio.google.com/apikey> | the Flash / Flash-Lite free tier |
+| **OpenRouter** | a key from <https://openrouter.ai/keys> | dozens of `:free` models |
 
-1. Paste the key in the settings panel.
-2. Pick a model from the dropdown — it is fetched **live** from the provider
-   and filtered to models that are free right now and support tool calling.
-   Hit ⟳ to refresh; the free line-up rotates often.
+Any other OpenAI-compatible endpoint works too — pick **Custom** and set the
+base URL.
+
+### Puter.js — free, no key at all
+
+Puter.js is a browser library, so **the dashboard tab is the brain**. The Python
+core queues a job on `GET /puter/jobs`, the page answers it with
+`puter.ai.chat()` and posts the reply back to `POST /puter/result`. Nothing else
+changes: tools, actions, mouse control, chat and call mode all still run in
+`server.py` — only the HTTP hop to the model moves into the browser.
+
+* Keep the dashboard tab open while Jarvis is working.
+* The first call pops up a free Puter sign-in; or press **CONNECT PUTER** in the
+  settings. The badge there reads `relay: online` when the tab is doing its job.
+* The model dropdown is filled live from `puter.ai.listModels()`.
+* If the tab is closed *and* a normal API key is saved, Jarvis quietly falls back
+  to that key instead of going dumb.
+
+### Gemini / OpenRouter
+
+1. Paste the key in the settings panel. It lands in **that provider's own slot**,
+   so a Gemini key and an OpenRouter key can both sit in `config.local.json` and
+   you can flip between them without pasting anything again.
+2. Pick a model from the dropdown — fetched **live** from the provider and
+   filtered to models that are free right now and support tool calling. Hit ⟳ to
+   refresh; the free line-up rotates often.
 3. Press **TEST**. If it comes back with a model name, you are done.
 
-> Free models are rate limited: OpenRouter allows 50 requests/day on free
-> models, or 1,000/day once you have bought $10 of credits. Jarvis keeps a
-> fallback list and walks it automatically when a model is rate limited.
+Gemini is not OpenAI-compatible, so `server.py` translates in both directions:
+your messages become `contents` + `systemInstruction`, the action catalogue
+becomes `functionDeclarations`, and `candidates[0].content.parts` (including
+`functionCall` parts) come back as a normal assistant message with `tool_calls`.
 
-**Where the key is stored:** in `config.local.json`, which is git-ignored.
+> Free tiers are rate limited — Gemini's Flash tier is roughly 10-15 requests a
+> minute, OpenRouter's is 50 requests/day until you buy $10 of credits. Jarvis
+> always queues the provider's other free models *behind* your chosen one and
+> walks the list automatically when a model is rate limited or retired.
+
+**Where keys are stored:** in `config.local.json`, which is git-ignored.
 `config.json` (tracked) only ever holds harmless settings, so a key cannot be
-committed by accident. You can also export `JARVIS_API_KEY` instead.
+committed by accident. You can also export `JARVIS_API_KEY`
+(OpenRouter/custom) or `GEMINI_API_KEY` / `GOOGLE_API_KEY`.
+
+> **Note:** OpenCode Zen (`provider: "zen"`) was retired and replaced by
+> Puter.js. An old `config.json` that still says `zen` is migrated to `puter`
+> automatically on load.
 
 ## What it can do
 
@@ -136,14 +173,35 @@ Turn failsafe/safe mode off in the settings panel if you need to.
 
 | File | What it is |
 |---|---|
-| `server.py` | the core: HTTP API, brain client, action dispatcher |
+| `server.py` | the core: HTTP API, brain clients (OpenAI / Gemini / Puter relay), action dispatcher |
 | `draw.py` | pure-geometry drawing library (shapes → mouse stroke paths) |
 | `model3d.py` | pure-geometry 3D modeller (meshes → OBJ/STL + SVG preview) |
-| `index.html` | the whole UI — canvas face, voice, chat, settings |
+| `index.html` | the whole UI — canvas face, voice, chat, settings, Puter.js relay |
 | `config.json` | tracked settings (never secrets) |
-| `config.local.json` | your API key (git-ignored, written by the UI) |
+| `config.local.json` | your API keys, one slot per provider (git-ignored, written by the UI) |
 | `contacts.json` | phone numbers by relation (`father`, `mother`, …) |
 | `tools/preview.py` | dev-only: renders shapes/models to PNG for checking |
+
+## HTTP API
+
+Everything the page uses is plain JSON on `localhost:8765` (`127.0.0.1` only,
+plus an origin check so a random website cannot drive your PC through it).
+
+| Endpoint | What it does |
+|---|---|
+| `POST /command` | run a spoken/typed instruction (local parser first, then the brain) |
+| `POST /chat` | plain conversation with the brain |
+| `GET /health` | core + brain status, provider, last model used |
+| `GET /config` · `POST /config` | read/save settings, keys and the provider |
+| `GET /providers` | provider metadata (labels, key hints, which API each one speaks) |
+| `GET /models?refresh=1&provider=` | that provider's free models, best first |
+| `POST /test` | one tiny round trip to prove the key/model works |
+| `GET /puter/jobs?wait=20` | long-poll the Puter.js relay for a brain job |
+| `POST /puter/result` | the browser posts the model's reply back |
+| `POST /puter/models` | the browser uploads `puter.ai.listModels()` |
+| `GET /puter/status` | is the relay online, how many models, runs/failures |
+| `POST /abort` | stop everything and release the mouse |
+| `GET /actions` | the last 25 actions the model performed |
 
 ## Tests
 
@@ -152,8 +210,13 @@ python -m unittest discover -s tests -v
 ```
 
 Covers the geometry (volumes against closed-form values, watertightness, OBJ/
-STL round-trips), the drawing pipeline, the tool schema and the offline
-command parser. None of it needs Windows or an API key.
+STL round-trips), the drawing pipeline, the tool schema, the offline command
+parser, and the brain layer: per-provider key slots, the retired-`zen`
+migration, the Gemini request/response translation (URL, headers,
+`functionDeclarations`, `functionCall` → `tool_calls`, model fall-through on
+404/429), the action-name/parameter collision fix, and a full Puter.js relay
+round trip driven by a fake browser thread. None of it needs Windows, a real
+browser or an API key.
 
 ## Notes
 
