@@ -181,6 +181,7 @@ Turn failsafe/safe mode off in the settings panel if you need to.
 | `config.local.json` | your API keys, one slot per provider (git-ignored, written by the UI) |
 | `contacts.json` | phone numbers by relation (`father`, `mother`, …) |
 | `tools/preview.py` | dev-only: renders shapes/models to PNG for checking |
+| `relative-pronouns-quiz/` | standalone interactive grammar quiz (open `index.html`) |
 
 ## HTTP API
 
