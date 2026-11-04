@@ -1,8 +1,12 @@
 # Relative Pronouns — interactive quiz
 
 A self-contained grammar quiz for English learners on `who, whom, whose, which,
-that, what` (plus `where · when · why` and `-ever` forms). No build step, no
-dependencies, no server: open `index.html` and it runs.
+that, what` (plus `where · when · why` and `-ever` forms).
+
+**The whole app is one file: `index.html`** — markup, styles, the question bank
+and the quiz engine. No build step, no dependencies, no server, no network
+requests: open or host that single file and it runs (it also works straight
+from `file://`).
 
 ## What is in it
 
@@ -34,17 +38,18 @@ are **error-spotting** items, and the rest are gap-fill.
   print-friendly answer key
 * the last attempt is remembered in `localStorage` (nothing leaves the browser)
 
-## Files
+## Structure of `index.html`
 
-| File | Purpose |
+| Section | What lives there |
 |---|---|
-| `index.html` | markup, design tokens and all styling |
-| `questions.js` | the question bank — edit this to add or change items |
-| `app.js` | quiz engine: state, rendering, scoring, results, review |
+| `<style>` in `<head>` | design tokens (light + dark), layout and component styles |
+| body markup | four screens — intro, quiz, results, review — plus the notes/confirm modals |
+| `<script>` #1 | `window.SECTIONS` and `window.QUESTIONS` — the question bank |
+| `<script>` #2 | the quiz engine: state, rendering, scoring, results, review |
 
 ## Adding a question
 
-Append to `window.QUESTIONS` in `questions.js`:
+Append an object to `window.QUESTIONS` in the first `<script>` block:
 
 ```js
 {
@@ -63,7 +68,8 @@ put the question in `prompt`.
 
 ## Notes
 
-* Everything is vanilla JS; there is nothing to install and no network calls.
+* Everything is vanilla JS inside the one HTML file; nothing to install, no network calls,
+  and no external fonts, images or libraries.
 * The 10-question quick practice is balanced across all five areas.
-* `index.html` can be opened straight from the filesystem (`file://`) — the two
-  scripts are loaded as plain files, not ES modules.
+* It can be opened straight from the filesystem (`file://`) — there are no modules
+  and no fetches, so it behaves the same offline, locally, or in any host.
